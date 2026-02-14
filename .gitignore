@@ -207,4 +207,6 @@ marimo/_lsp/
 __marimo__/
 
 #Other
+03_Day/
 data/
+gps_map.html
