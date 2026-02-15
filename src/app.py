@@ -10,7 +10,10 @@ from src.config import GPS_MAP_FILE
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="LiDAR processing CLI")
-    parser.add_argument("--dataset", choices=["helimos", "helipr", "gps"], required=True)
+    parser.add_argument(
+    "--dataset",
+    choices=["helimos", "helipr", "hercules", "gps"],
+    required=True)
     parser.add_argument("--bin", type=str, required=False)
     parser.add_argument("--gps", type=str, required=False, help="Путь к GPS CSV файлу")
     parser.add_argument("--action", choices=["cloud", "velocity", "map"], required=True)
@@ -60,6 +63,24 @@ def main() -> None:
             plot_velocity_vs_azimuth(pc)
         else:
             visualize_point_cloud(pc)
+    
+    elif args.dataset == "hercules":
+        # Импортируем только если нужно
+        from src.datasets.hercules import load_hercules_aeva
+        from src.viz.clouds import visualize_point_cloud
+        from src.viz.plots import plot_velocity_vs_azimuth
+
+        if not args.bin:
+            print("Ошибка: для hercules требуется указать --bin <путь_к_файлу>")
+            return
+
+        pc = load_hercules_aeva(args.bin)
+
+        if args.action == "velocity":
+            plot_velocity_vs_azimuth(pc)
+        else:
+            visualize_point_cloud(pc)
+
 
 
 if __name__ == "__main__":

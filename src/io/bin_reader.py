@@ -1,4 +1,5 @@
 import numpy as np
+import os
 import struct
 from typing import Optional
 from src.core.pointcloud import PointCloud
@@ -73,6 +74,60 @@ def read_helipr_bin(path: str, typeLidar: str) -> PointCloud:
 
             else:
                 raise ValueError(f"Unsupported LiDAR type: {typeLidar}")
+
+    xyz = np.asarray(xyz, dtype=np.float32)
+
+    intensity_arr: Optional[np.ndarray]
+    velocity_arr: Optional[np.ndarray]
+
+    intensity_arr = np.asarray(intensity, dtype=np.float32) if intensity else None
+    velocity_arr = np.asarray(velocity, dtype=np.float32) if velocity else None
+
+    return PointCloud(
+        xyz=xyz,
+        intensity=intensity_arr,
+        velocity=velocity_arr,
+    )
+
+
+def read_hercules_bin(path: str) -> PointCloud:
+    xyz = []
+    intensity = []
+    velocity = []
+
+    # timestamp берём из имени файла
+    filename = os.path.basename(path)
+    timestamp = int(os.path.splitext(filename)[0])
+
+    FORMAT_SWITCH_TS = 1691936557946849179
+
+    with open(path, "rb") as file:
+        while True:
+
+            if timestamp > FORMAT_SWITCH_TS:
+                data = file.read(29)
+                if len(data) < 29:
+                    break
+
+                x, y, z, reflectivity, vel = struct.unpack("<fffff", data[:20])
+
+                _time_offset_ns = struct.unpack("<I", data[20:24])[0]
+                _line_index = struct.unpack("<B", data[24:25])[0]
+                _intensity_extra = struct.unpack("<f", data[25:29])[0]
+
+            else:
+                data = file.read(25)
+                if len(data) < 25:
+                    break
+
+                x, y, z, reflectivity, vel = struct.unpack("<fffff", data[:20])
+
+                _time_offset_ns = struct.unpack("<I", data[20:24])[0]
+                _line_index = struct.unpack("<B", data[24:25])[0]
+
+            xyz.append([x, y, z])
+            intensity.append(reflectivity)
+            velocity.append(vel)
 
     xyz = np.asarray(xyz, dtype=np.float32)
 
