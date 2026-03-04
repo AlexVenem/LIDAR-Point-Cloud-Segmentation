@@ -104,3 +104,98 @@ def plot_imu_accel(imu_df: pd.DataFrame) -> None:
     plt.title("IMU acceleration")
     plt.legend()
     plt.show()
+
+
+# ── MOS 2-D plots ────────────────────────────────────────────────────────────
+
+# Palette matching the Open3D one in clouds.py
+_MOS_PALETTE = [
+    "#ff3333",  # red
+    "#ff9900",  # orange
+    "#ffff00",  # yellow
+    "#00e633",  # green
+    "#00ccff",  # cyan
+    "#9933ff",  # violet
+    "#ff66cc",  # pink
+    "#ccff66",  # lime
+    "#66ccff",  # sky
+    "#ffcc66",  # peach
+]
+
+
+def plot_mos(
+    pc: PointCloud,
+    is_moving: np.ndarray,
+    ego_params: "np.ndarray | None" = None,
+    title: str = "",
+) -> None:
+    """
+    Два 2D-графика MOS-результата (static vs moving):
+
+    Левый  — radial velocity vs azimuth (v_r(α)):
+             статические точки серые, движущиеся красные,
+             RANSAC-кривая чёрная.
+    Правый — bird's-eye view (x, y) с теми же цветами.
+
+    Parameters
+    ----------
+    pc          : PointCloud (xyz обязательно, velocity — опционально)
+    is_moving   : bool mask
+    ego_params  : [Vx, Vy] для отрисовки RANSAC-кривой (опционально)
+    title       : заголовок окна
+    """
+    x, y, z = pc.xyz[:, 0], pc.xyz[:, 1], pc.xyz[:, 2]
+    azimuth_deg = np.degrees(np.arctan2(y, x))
+    has_velocity = pc.velocity is not None
+
+    static_mask = ~is_moving
+
+    if has_velocity:
+        fig, (ax_vel, ax_bev) = plt.subplots(1, 2, figsize=(16, 7))
+        if title:
+            fig.suptitle(title, fontsize=13)
+
+        # ── Left: velocity vs azimuth ──────────────────────────────────────
+        v = pc.velocity
+        ax_vel.scatter(
+            azimuth_deg[static_mask], v[static_mask],
+            s=0.4, c="#999999", alpha=0.5, label="static", rasterized=True,
+        )
+        ax_vel.scatter(
+            azimuth_deg[is_moving], v[is_moving],
+            s=3, c="#e63333", alpha=0.7, label="moving", rasterized=True,
+        )
+        if ego_params is not None:
+            alpha_sweep = np.linspace(azimuth_deg.min(), azimuth_deg.max(), 500)
+            alpha_rad = np.radians(alpha_sweep)
+            vr_model = -ego_params[0] * np.cos(alpha_rad) - ego_params[1] * np.sin(alpha_rad)
+            ax_vel.plot(alpha_sweep, vr_model, "k-", lw=1.8, label="ego-motion model")
+
+        ax_vel.set_xlabel("Azimuth [deg]")
+        ax_vel.set_ylabel("Radial velocity [m/s]")
+        ax_vel.set_title("Radial velocity vs Azimuth")
+        ax_vel.legend(loc="lower left", fontsize=8, markerscale=3)
+        ax_vel.grid(True, alpha=0.3)
+    else:
+        fig, ax_bev = plt.subplots(1, 1, figsize=(9, 7))
+        if title:
+            fig.suptitle(title, fontsize=13)
+
+    # ── Bird's-eye view (x, y) ────────────────────────────────────────────
+    ax_bev.scatter(
+        x[static_mask], y[static_mask],
+        s=0.3, c="#999999", alpha=0.4, label="static", rasterized=True,
+    )
+    ax_bev.scatter(
+        x[is_moving], y[is_moving],
+        s=3, c="#e63333", alpha=0.7, label="moving", rasterized=True,
+    )
+    ax_bev.set_xlabel("x, m")
+    ax_bev.set_ylabel("y, m")
+    ax_bev.set_title("Bird's-eye view")
+    ax_bev.set_aspect("equal")
+    ax_bev.legend(loc="upper right", fontsize=8, markerscale=3)
+    ax_bev.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()

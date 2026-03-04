@@ -22,8 +22,8 @@ pip install -r requirements.txt
 2. Запускайте команды из корневой директории проекта:
 
 ```bash
-# Пример: визуализация GPS
-python src/app.py --dataset gps --gps 03_Day/sensor_data/gps.csv --action map
+# Пример: визуализация GPS (данные из датасета hercules)
+python -m src.app --dataset hercules --gps 03_Day/sensor_data/gps.csv --action map
 ```
 
 3. После успешного запуска будет создана HTML-карта (по умолчанию `gps_map.html` или путь из конфига).
@@ -32,24 +32,43 @@ python src/app.py --dataset gps --gps 03_Day/sensor_data/gps.csv --action map
 
 ## Запуск для разных датасетов
 
-- HeLiMOS (KITTI-подобный бинарный формат):
+Доступные датасеты: `helimos`, `helipr`, `hercules`. GPS, INS, IMU и Radar — это сенсорные данные датасета **hercules**.
+
+### HeLiMOS (KITTI-подобный бинарный формат)
 
 ```bash
-python src/app.py --dataset helimos --bin <path_to_bin> --action cloud
+python -m src.app --dataset helimos --bin <path_to_bin> --action cloud
 ```
 
-- HeLiPR (несколько форматов LiDAR, пример Aeva):
+### HeLiPR (Aeva LiDAR)
 
 ```bash
-python src/app.py --dataset helipr --bin <path_to_bin> --action cloud
-# или для отображения графика азимута от радиальной скорости
-python src/app.py --dataset helipr --bin <path_to_bin> --action velocity
+python -m src.app --dataset helipr --bin <path_to_bin> --action cloud
+# график радиальной скорости от азимута
+python -m src.app --dataset helipr --bin <path_to_bin> --action velocity
 ```
 
-- GPS (CSV):
+### HeRCULES
+
+Датасет hercules содержит несколько типов сенсорных данных. Тип данных определяется аргументом пути:
 
 ```bash
-python src/app.py --dataset gps --gps 03_Day/sensor_data/gps.csv --action map
+# Aeva LiDAR (--bin)
+python -m src.app --dataset hercules --bin <path_to_aeva.bin> --action cloud
+python -m src.app --dataset hercules --bin <path_to_aeva.bin> --action velocity
+
+# Radar (--radar)
+python -m src.app --dataset hercules --radar <path_to_radar.bin> --action cloud
+python -m src.app --dataset hercules --radar <path_to_radar.bin> --action velocity
+
+# GPS (--gps)
+python -m src.app --dataset hercules --gps <path_to_gps.csv> --action map
+
+# INS (--ins)
+python -m src.app --dataset hercules --ins <path_to_ins.csv> --action track
+
+# IMU (--imu)
+python -m src.app --dataset hercules --imu <path_to_imu.csv> --action accel
 ```
 
 Примечание: приложение использует ленивые импорты — heavy-зависимости (например, `open3d`) подгружаются только при визуализации облака точек, поэтому визуализация GPS работает даже без установки всех пакетов.
@@ -94,6 +113,64 @@ python src/app.py --dataset gps --gps 03_Day/sensor_data/gps.csv --action map
 
 ---
 
+## Motion Object Segmentation (MOS)
+
+Модуль сегментации движущихся объектов в облаке точек LiDAR. Классифицирует каждую точку как **static** или **moving** с помощью Random Forest, обученного на размеченных данных HeLiMOS.
+
+### 1. Обучение модели
+
+Обучение на HeLiMOS (ground truth labels: static=9, moving=251):
+
+```bash
+python -m src.app --dataset helimos --action mos-train --sequence data/Deskewed_LiDAR --sensor Velodyne --split train
+```
+
+Параметры:
+- `--sequence` — путь к корню датасета Deskewed_LiDAR (по умолчанию: `data/Deskewed_LiDAR`)
+- `--sensor` — тип сенсора: `Velodyne`, `Ouster`, `Avia`, `Aeva` (по умолчанию: `Velodyne`)
+- `--split` — раздел датасета: `train`, `val`, `test` (по умолчанию: `train`)
+- `--max-frames` — ограничить число кадров для обучения (по умолчанию: все)
+- `--model` — путь для сохранения модели (по умолчанию: `models/mos_rf.pkl`)
+- `--threshold` — порог P(moving) для классификатора (по умолчанию: `0.85`)
+
+Обучение занимает ~2 минуты. Модель сохраняется в `models/mos_rf.pkl`.
+
+### 2. Инференс на одном кадре
+
+Работает с любым датасетом — loader выбирается по `--dataset`:
+
+```bash
+# HeLiMOS (Velodyne, без Допплера — на левом графике height profile)
+python -m src.app --dataset helimos --bin <path_to_helimos.bin> --action mos --model models/mos_rf.pkl
+
+# HeLiPR Aeva (есть Допплер — на левом графике radial velocity vs azimuth)
+python -m src.app --dataset helipr --bin <path_to_aeva.bin> --action mos --model models/mos_rf.pkl
+
+# Hercules Aeva
+python -m src.app --dataset hercules --bin <path_to_aeva.bin> --action mos --model models/mos_rf.pkl
+
+# Hercules Radar
+python -m src.app --dataset hercules --radar <path_to_radar.bin> --action mos --model models/mos_rf.pkl
+```
+
+Результат — два графика matplotlib:
+- **Левый**: radial velocity vs azimuth (если есть Допплер) или height profile (если нет) — серые точки = static, красные = moving
+- **Правый**: bird's-eye view (x, y) — те же цвета
+
+### 3. Инференс на последовательности кадров
+
+Использует temporal consistency через SE(3) позы для более точной сегментации:
+
+```bash
+python -m src.app --dataset helimos --action mos-sequence --sequence data/Deskewed_LiDAR --sensor Velodyne --split val --n-frames 10 --n-context 3 --model models/mos_rf.pkl
+```
+
+Параметры:
+- `--n-frames` — число кадров для обработки (по умолчанию: `5`)
+- `--n-context` — размер временного окна для temporal consistency (по умолчанию: `3`)
+
+---
+
 ## Примеры
 
 - Скрипт-пример чтения и визуализации GPS: `src/examples/gps_example.py` (использует константы из `src/config.py`).
@@ -108,6 +185,8 @@ python src/app.py --dataset gps --gps 03_Day/sensor_data/gps.csv --action map
 - folium — интерактивные карты
 - matplotlib — графики
 - open3d — (опционально) визуализация облаков точек
+- scikit-learn — Random Forest для MOS
+- joblib — сериализация модели
 
 Примечание: если вам не нужна визуализация облаков точек, можно пропустить установку `open3d`.
 
