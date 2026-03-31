@@ -236,18 +236,16 @@ ffmpeg -framerate 10 -i output/mos_frames/%06d.png -c:v libx264 -pix_fmt yuv420p
 
 Строит два графика рядом:
 
-**Модуль скорости, м/с** — сравнение GPS и ИНС:
+**Модуль скорости, м/с** — сравнение GPS, ИНС и оцененной собственной скорости с помощью RANSAC:
 - Красные точки — GPS: скорость вычисляется из конечных разностей ECEF-координат (`GPS_to_V` из `src/odometry`). Измерения шумные, но независимые.
 - Чёрная линия — ИНС: скорость из компонент NED-вектора, пересчитанных в ECEF через матрицу поворота (`INS_to_V`). Гладкая высокочастотная оценка.
+- Синяя линия - оцененная собственная скорость.
 
 **Угловая скорость рыскания, °/с** — направление движения из ИНС:
 - Производная азимута (курсового угла) по времени. На прямолинейных участках ≈ 0, на поворотах — характерные пики; каждый пик соответствует одному повороту маршрута.
 
 ```bash
-python -m src.app --dataset hercules \
-    --gps 03_Day/sensor_data/gps.csv \
-    --ins 03_Day/sensor_data/inspva.csv \
-    --action velocity
+python -m src.app --dataset hercules --action velocity --gps 03_Day/sensor_data/gps.csv --ins 03_Day/sensor_data/inspva.csv --aeva 03_Day/Aeva --output output/velocity_comparison.png
 ```
 
 График сохраняется в `velocity_plot.png`. Путь можно переопределить через `--output`.

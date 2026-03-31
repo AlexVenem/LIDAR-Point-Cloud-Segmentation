@@ -71,6 +71,12 @@ def main() -> None:
                              "Ближайший по временной метке кадр добавляется к MOS-графику.")
     parser.add_argument("--gpu", action="store_true",
                         help="Использовать GPU (XGBoost CUDA) вместо CPU (Random Forest) для обучения MOS")
+    parser.add_argument("--aeva", type=str, required=False,
+                        help="Папка с .bin кадрами Aeva (например 03_Day/Aeva)")
+    parser.add_argument("--dpi", type=int, required=False, default=120,
+                        help="DPI сохраняемых PNG для mos-sequence (по умолчанию: 120)")
+    parser.add_argument("--start", type=int, required=False, default=0,
+                        help="Начальный индекс кадра для mos-sequence (по умолчанию: 0)")
 
     args = parser.parse_args()
 
@@ -235,7 +241,9 @@ def main() -> None:
 
             if args.action == "velocity":
                 out = args.output if args.output != GPS_MAP_FILE else VELOCITY_PLOT_FILE
-                plot_velocity_comparison(args.gps, args.ins, out)
+                plot_velocity_comparison(args.gps, args.ins, out,
+                                        aeva_path=args.aeva,
+                                        inlier_threshold=args.inlier_threshold)
             else:
                 print("Ошибка: для --gps + --ins поддерживается только action='velocity'")
 

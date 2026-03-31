@@ -1,3 +1,4 @@
+import os as _os
 import numpy as np
 import matplotlib.pyplot as plt
 import folium
@@ -85,23 +86,28 @@ def plot_gps_on_map(gps_df, output_file='gps_map.html'):
     
     return map_gps
 
-def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str) -> None:
+def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
+                             aeva_path: "str | None" = None,
+                             inlier_threshold: float = 0.5) -> None:
     """
     Графики модуля скорости и угловой скорости рыскания.
 
     Левый график — скорость, м/с:
         GPS  — красные точки (из конечных разностей ECEF-координат через GPS_to_V)
         ИНС  — чёрная линия (из NED-компонент скорости через INS_to_V)
+        Aeva — синие точки (RANSAC ego-motion из Doppler LiDAR, если aeva_path задан)
 
     Правый график — угловая скорость рыскания, °/с:
         ИНС  — чёрные точки (производная азимута из INSPVA)
 
     Parameters:
-        gps_path    : путь к GPS CSV (колонки: timestamp_нс, lat, lon, height, ...)
-        ins_path    : путь к INSPVA CSV (колонки: timestamp_нс, lat, lon, height,
-                      Vn, Ve, Vu, roll, pitch, azimuth, status)
-        output_path : путь для сохранения PNG
+        gps_path          : путь к GPS CSV
+        ins_path          : путь к INSPVA CSV
+        output_path       : путь для сохранения PNG
+        aeva_path         : папка с .bin кадрами Aeva (опционально)
+        inlier_threshold  : RANSAC inlier threshold [m/s]
     """
+    import glob as _glob
     from src.odometry import GPS_to_V, INS_to_V
 
     # Загрузка
@@ -148,6 +154,56 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str) -> 
     speed_ins_plot = uniform_filter1d(speed_ins[ins_mask], size=5)
     yaw_rate_plot  = yaw_rate[ins_mask]
 
+    # ── Aeva ego-velocity (RANSAC per frame, с кэшированием) ────────────
+    plot_t_min, plot_t_max = 100, 250
+
+    ts_aeva_plot = None
+    speed_aeva_plot = None
+    if aeva_path:
+        cache_path = _os.path.join(aeva_path, "aeva_ego_cache.npz")
+
+        if _os.path.exists(cache_path):
+            cached = np.load(cache_path)
+            ts_aeva = cached["timestamps_s"]
+            speed_aeva = cached["speed"]
+            print(f"[Aeva] Загружен кэш: {cache_path} ({len(ts_aeva)} кадров)")
+        else:
+            from src.datasets.hercules import load_hercules_aeva
+            from src.motion_segmentation import ransac_ego_motion
+
+            bin_files = sorted(_glob.glob(_os.path.join(aeva_path, "*.bin")))
+            ts_list = []
+            speed_list = []
+            n = len(bin_files)
+            for i, bf in enumerate(bin_files):
+                stem = _os.path.splitext(_os.path.basename(bf))[0]
+                if not stem.isdigit():
+                    continue
+                pc = load_hercules_aeva(bf)
+                if pc.velocity is None:
+                    continue
+                try:
+                    ego_params, _ = ransac_ego_motion(pc, inlier_threshold=inlier_threshold)
+                except Exception:
+                    continue
+                ego_speed = float(np.sqrt(ego_params[0] ** 2 + ego_params[1] ** 2))
+                ts_list.append(int(stem) / 1e9)
+                speed_list.append(ego_speed)
+                if (i + 1) % 50 == 0:
+                    print(f"\r[Aeva] RANSAC: {i + 1}/{n}", end="", flush=True)
+
+            ts_aeva = np.array(ts_list)
+            speed_aeva = np.array(speed_list)
+            np.savez(cache_path, timestamps_s=ts_aeva, speed=speed_aeva)
+            print(f"\n[Aeva] Кэш сохранён: {cache_path} ({len(ts_aeva)} кадров)")
+
+        if len(ts_aeva) > 0:
+            ts_rel = ts_aeva - t0 - t_start
+            mask = (ts_rel >= plot_t_min) & (ts_rel <= plot_t_max)
+            ts_aeva_plot = ts_rel[mask]
+            speed_aeva_plot = speed_aeva[mask]
+            print(f"[Aeva] На графике: {int(mask.sum())} кадров")
+
     # Построение
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
     fig.subplots_adjust(wspace=0.35, bottom=0.13)
@@ -155,13 +211,18 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str) -> 
     ax1 = axes[0]
     ax1.scatter(ts_gps_plot, speed_gps_plot, s=4, c="red", alpha=0.6, zorder=2, label="GPS")
     ax1.plot(ts_ins_plot, speed_ins_plot, "k-", linewidth=1.5, zorder=3, label="ИНС")
+    if ts_aeva_plot is not None and len(ts_aeva_plot) > 0:
+        ax1.scatter(ts_aeva_plot, speed_aeva_plot, s=6, c="blue", alpha=0.7,
+                    zorder=4, label="Aeva (RANSAC)")
     ax1.set_xlabel("время, с", fontsize=11)
     ax1.set_ylabel("скорость, м/с", fontsize=11)
     ax1.set_xlim(100, 250)
     ax1.set_ylim(0, 10)
     ax1.grid(True, linestyle="--", alpha=0.5)
     ax1.legend(fontsize=10, loc="upper right")
-    ax1.set_title("Скорость (м/с) от времени (с) (GPS + INS)", loc="left", fontsize=11, fontweight="bold")
+    title_suffix = " + Aeva" if ts_aeva_plot is not None else ""
+    ax1.set_title(f"Скорость (м/с) от времени (с) (GPS + INS{title_suffix})",
+                  loc="left", fontsize=11, fontweight="bold")
 
     ax2 = axes[1]
     ax2.plot(ts_ins_plot, yaw_rate_plot, "k.", markersize=1.5, zorder=2)
@@ -172,8 +233,7 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str) -> 
     ax2.grid(True, linestyle="--", alpha=0.5)
     ax2.set_title("Угол (град) от времени (с)", loc="left", fontsize=11, fontweight="bold")
 
-    import os
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    _os.makedirs(_os.path.dirname(output_path), exist_ok=True)
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     print(f"График сохранён: {output_path}")
     plt.show()
