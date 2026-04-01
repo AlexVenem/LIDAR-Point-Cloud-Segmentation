@@ -244,8 +244,10 @@ ffmpeg -framerate 10 -i output/mos_frames/%06d.png -c:v libx264 -pix_fmt yuv420p
 **Угловая скорость рыскания, °/с** — направление движения из ИНС:
 - Производная азимута (курсового угла) по времени. На прямолинейных участках ≈ 0, на поворотах — характерные пики; каждый пик соответствует одному повороту маршрута.
 
+Также рисует собственную скорость и угловую скорость для радара
+
 ```bash
-python -m src.app --dataset hercules --action velocity --gps 03_Day/sensor_data/gps.csv --ins 03_Day/sensor_data/inspva.csv --aeva 03_Day/Aeva --output output/velocity_comparison.png
+python -m src.app --dataset hercules --gps 03_Day/sensor_data/gps.csv --ins 03_Day/sensor_data/inspva.csv --aeva 03_Day/Aeva --radar 03_Day/Radar/Continental --action velocity
 ```
 
 График сохраняется в `velocity_plot.png`. Путь можно переопределить через `--output`.

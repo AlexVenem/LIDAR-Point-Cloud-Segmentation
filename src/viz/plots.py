@@ -88,6 +88,7 @@ def plot_gps_on_map(gps_df, output_file='gps_map.html'):
 
 def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
                              aeva_path: "str | None" = None,
+                             radar_path: "str | None" = None,
                              inlier_threshold: float = 0.5) -> None:
     """
     Графики модуля скорости и угловой скорости рыскания.
@@ -259,6 +260,88 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
                 yaw_rate_icp_raw = np.array(yaw_rates)
                 yaw_rate_icp_plot = uniform_filter1d(yaw_rate_icp_raw, size=5)
 
+    # Radar ego-velocity (RANSAC) + ICP yaw rate
+    ts_radar_plot = None
+    speed_radar_plot = None
+    ts_radar_icp_plot = None
+    yaw_rate_radar_icp_plot = None
+    if radar_path:
+        import open3d as o3d
+        from src.datasets.radar import load_radar_frame
+        from src.motion_segmentation import ransac_ego_motion as _ransac
+
+        radar_files = sorted(_glob.glob(_os.path.join(radar_path, "*.bin")))
+        radar_files = [f for f in radar_files
+                       if _os.path.splitext(_os.path.basename(f))[0].isdigit()]
+
+        # RANSAC speed
+        r_ts, r_speed = [], []
+        for i, bf in enumerate(radar_files):
+            stem = _os.path.splitext(_os.path.basename(bf))[0]
+            pc = load_radar_frame(bf)
+            if pc.velocity is None:
+                continue
+            try:
+                ep, _ = _ransac(pc, inlier_threshold=inlier_threshold)
+            except Exception:
+                continue
+            r_ts.append(int(stem) / 1e9)
+            r_speed.append(float(np.sqrt(ep[0] ** 2 + ep[1] ** 2)))
+            if (i + 1) % 50 == 0:
+                print(f"\r[Radar] RANSAC: {i + 1}/{len(radar_files)}", end="", flush=True)
+
+        if r_ts:
+            print(f"\n[Radar] RANSAC готово: {len(r_ts)} кадров")
+            r_ts = np.array(r_ts)
+            r_speed = np.array(r_speed)
+            r_rel = r_ts - t0 - t_start
+            r_mask = (r_rel >= plot_t_min) & (r_rel <= plot_t_max)
+            ts_radar_plot = r_rel[r_mask]
+            speed_radar_plot = r_speed[r_mask]
+
+        # ICP yaw rate
+        radar_icp_files = []
+        radar_icp_ts = []
+        for bf in radar_files:
+            stem = _os.path.splitext(_os.path.basename(bf))[0]
+            t_rel = int(stem) / 1e9 - t0 - t_start
+            if plot_t_min <= t_rel <= plot_t_max:
+                radar_icp_files.append(bf)
+                radar_icp_ts.append(t_rel)
+        radar_icp_ts = np.array(radar_icp_ts)
+
+        if len(radar_icp_files) > 1:
+            voxel_size = 0.5
+            r_yaw_rates, r_ts_mid = [], []
+            prev_pcd = None
+            for i, bf in enumerate(radar_icp_files):
+                pc = load_radar_frame(bf)
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = o3d.utility.Vector3dVector(pc.xyz)
+                pcd = pcd.voxel_down_sample(voxel_size)
+
+                if prev_pcd is not None:
+                    dt = radar_icp_ts[i] - radar_icp_ts[i - 1]
+                    if dt > 0:
+                        result = o3d.pipelines.registration.registration_icp(
+                            pcd, prev_pcd, max_correspondence_distance=1.0,
+                            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+                            criteria=o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=30),
+                        )
+                        R = result.transformation[:3, :3]
+                        yaw = np.arctan2(R[1, 0], R[0, 0])
+                        r_yaw_rates.append(-np.degrees(yaw) / dt)
+                        r_ts_mid.append((radar_icp_ts[i] + radar_icp_ts[i - 1]) / 2)
+
+                prev_pcd = pcd
+                if (i + 1) % 100 == 0:
+                    print(f"\r[Radar ICP] {i + 1}/{len(radar_icp_files)}", end="", flush=True)
+
+            if r_yaw_rates:
+                print(f"\n[Radar ICP] Готово: {len(r_yaw_rates)} пар")
+                ts_radar_icp_plot = np.array(r_ts_mid)
+                yaw_rate_radar_icp_plot = uniform_filter1d(np.array(r_yaw_rates), size=5)
+
     # Детекция пиков угловой скорости (только N самых выраженных)
     from scipy.signal import find_peaks
     import contextily as ctx
@@ -306,13 +389,19 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
     if ts_aeva_plot is not None and len(ts_aeva_plot) > 0:
         ax1.scatter(ts_aeva_plot, speed_aeva_plot, s=6, c="blue", alpha=0.7,
                     zorder=4, label="Aeva (RANSAC)")
+    if ts_radar_plot is not None and len(ts_radar_plot) > 0:
+        ax1.scatter(ts_radar_plot, speed_radar_plot, s=6, c="green", alpha=0.7,
+                    zorder=4, label="Radar (RANSAC)")
     ax1.set_xlabel("время, с", fontsize=11)
     ax1.set_ylabel("скорость, м/с", fontsize=11)
     ax1.set_xlim(plot_t_min, plot_t_max)
     ax1.set_ylim(0, 10)
     ax1.grid(True, linestyle="--", alpha=0.5)
     ax1.legend(fontsize=10, loc="upper right")
-    title_suffix = " + Aeva" if ts_aeva_plot is not None else ""
+    sensors = []
+    if ts_aeva_plot is not None: sensors.append("Aeva")
+    if ts_radar_plot is not None: sensors.append("Radar")
+    title_suffix = " + " + " + ".join(sensors) if sensors else ""
     ax1.set_title(f"Скорость (м/с) от времени (с) (GPS + INS{title_suffix})",
                   loc="left", fontsize=11, fontweight="bold")
 
@@ -321,6 +410,9 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
     if ts_icp_plot is not None and len(ts_icp_plot) > 0:
         ax2.plot(ts_icp_plot, yaw_rate_icp_plot, "b-", linewidth=1.5,
                  alpha=0.7, zorder=3, label="Aeva (ICP)")
+    if ts_radar_icp_plot is not None and len(ts_radar_icp_plot) > 0:
+        ax2.plot(ts_radar_icp_plot, yaw_rate_radar_icp_plot, "g-", linewidth=1.5,
+                 alpha=0.7, zorder=3, label="Radar (ICP)")
     for j, (pt, py) in enumerate(zip(peak_times, peak_yaw)):
         color = _peak_colors[j % len(_peak_colors)]
         ax2.plot(pt, py, "o", color=color, markersize=9, zorder=5,
