@@ -402,7 +402,7 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
     if ts_aeva_plot is not None: sensors.append("Aeva")
     if ts_radar_plot is not None: sensors.append("Radar")
     title_suffix = " + " + " + ".join(sensors) if sensors else ""
-    ax1.set_title(f"Скорость (м/с) от времени (с) (GPS + INS{title_suffix})",
+    ax1.set_title(f"a) Скорость (м/с) от времени (с) (GPS + INS{title_suffix})",
                   loc="left", fontsize=11, fontweight="bold")
 
     # Угловая скорость + пронумерованные пики
@@ -428,7 +428,7 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
     ax2.axhline(0, color="gray", linewidth=0.8)
     ax2.grid(True, linestyle="--", alpha=0.5)
     ax2.legend(fontsize=10, loc="upper right")
-    ax2.set_title("Угловая скорость рыскания (°/с)", loc="left", fontsize=11, fontweight="bold")
+    ax2.set_title("b) Угловая скорость рыскания (°/с)", loc="left", fontsize=11, fontweight="bold")
 
     # Карта с траекторией и пронумерованными поворотами
     ax3.plot(traj_lon, traj_lat, "-", color="#e63333", linewidth=2.5,
@@ -459,7 +459,7 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
     ax3.set_xlabel("долгота", fontsize=11)
     ax3.set_ylabel("широта", fontsize=11)
     ax3.legend(fontsize=9, loc="upper right")
-    ax3.set_title("Траектория с местами поворотов", loc="left", fontsize=11, fontweight="bold")
+    ax3.set_title("c) Траектория с местами поворотов", loc="left", fontsize=11, fontweight="bold")
 
     _os.makedirs(_os.path.dirname(output_path), exist_ok=True)
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
