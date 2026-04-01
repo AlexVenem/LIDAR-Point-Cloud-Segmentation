@@ -200,13 +200,13 @@ python -m src.app --dataset helimos --action mos-sequence --sequence data/Deskew
 
 ### 4. Покадровый рендеринг последовательности (для GIF / видео)
 
-Скрипт `src/examples/mos_sequence_example.py` обрабатывает все кадры Aeva и сохраняет каждый как PNG с фиксированными осями (графики не скачут между кадрами):
+Обработка всех кадров Aeva и сохранение каждог как PNG с фиксированными осями:
 
 ```bash
-python -m src.examples.mos_sequence_example \
-    --aeva   03_Day/Aeva \
-    --camera 03_Day/stereo_left \
+python -m src.app --dataset hercules --action mos-sequence \
+    --aeva 03_Day/Aeva --camera 03_Day/stereo_left \
     --output output/mos_frames
+
 ```
 
 Для Aeva (есть Допплер) модель не нужна — используется RANSAC. Для сенсоров без Допплера добавьте `--model models/mos_rf.pkl`.
