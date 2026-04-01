@@ -273,7 +273,10 @@ def main() -> None:
 
             if args.action == "velocity":
                 out = args.output if args.output != GPS_MAP_FILE else VELOCITY_PLOT_FILE
-                plot_velocity_comparison(args.gps, args.ins, out)
+                plot_velocity_comparison(args.gps, args.ins, out,
+                                        aeva_path=args.aeva,
+                                        radar_path=args.radar,
+                                        inlier_threshold=args.inlier_threshold)
             else:
                 print("Ошибка: для --gps + --ins поддерживается только action='velocity'")
 
