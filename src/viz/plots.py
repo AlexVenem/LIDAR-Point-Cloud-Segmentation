@@ -287,6 +287,14 @@ def plot_mos(
             vr_model = -ego_params[0] * np.cos(alpha_rad) - ego_params[1] * np.sin(alpha_rad)
             ax_vel.plot(alpha_sweep, vr_model, "k-", lw=1.8, label="ego-motion model")
 
+            ego_speed = float(np.sqrt(ego_params[0] ** 2 + ego_params[1] ** 2))
+            ax_vel.text(
+                0.98, 0.97, f"|V_ego| = {ego_speed:.2f} m/s",
+                transform=ax_vel.transAxes, ha="right", va="top",
+                fontsize=10, fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
+            )
+
         ax_vel.set_xlabel("Azimuth [deg]")
         ax_vel.set_ylabel("Radial velocity [m/s]")
         ax_vel.set_title("Radial velocity vs Azimuth")
@@ -349,6 +357,239 @@ def plot_ego_velocity(Vx: np.ndarray, Vy: np.ndarray, ts: np.ndarray,
     ax2.set_ylabel("|V| [m/s]")
     ax2.set_title("Absolute velocity")
     ax2.grid(True, alpha=0.3)
- 
+
     plt.tight_layout()
     plt.show()
+
+
+# MOS sequence rendering (Hercules / Aeva)
+
+import os as _os
+
+
+def _build_camera_index(camera_dir: str):
+    """Return sorted list of (timestamp_ns, filepath) for all .png files."""
+    entries = []
+    for f in _os.listdir(camera_dir):
+        if not f.lower().endswith(".png"):
+            continue
+        stem = _os.path.splitext(f)[0]
+        if stem.isdigit():
+            entries.append((int(stem), _os.path.join(camera_dir, f)))
+    entries.sort()
+    return entries
+
+
+def _find_closest_camera(cam_index, lidar_ts: int):
+    """Binary search for the closest camera timestamp."""
+    if not cam_index:
+        return None
+    lo, hi = 0, len(cam_index) - 1
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if cam_index[mid][0] < lidar_ts:
+            lo = mid + 1
+        else:
+            hi = mid
+    best = lo
+    if lo > 0 and abs(cam_index[lo - 1][0] - lidar_ts) < abs(cam_index[lo][0] - lidar_ts):
+        best = lo - 1
+    return cam_index[best][1]
+
+
+def _compute_fixed_limits(bin_files, loader_fn, n_probe=20):
+    """
+    Scan first n_probe frames to determine stable axis limits.
+    Returns dict with azimuth, velocity, x, y ranges (with padding).
+    """
+    az_min, az_max = np.inf, -np.inf
+    v_min, v_max = np.inf, -np.inf
+    x_min, x_max = np.inf, -np.inf
+    y_min, y_max = np.inf, -np.inf
+
+    step = max(1, len(bin_files) // n_probe)
+    probes = bin_files[::step][:n_probe]
+
+    for path in probes:
+        pc = loader_fn(path)
+        x, y = pc.xyz[:, 0], pc.xyz[:, 1]
+        az = np.degrees(np.arctan2(y, x))
+
+        az_min = min(az_min, float(np.percentile(az, 1)))
+        az_max = max(az_max, float(np.percentile(az, 99)))
+        x_min = min(x_min, float(np.percentile(x, 1)))
+        x_max = max(x_max, float(np.percentile(x, 99)))
+        y_min = min(y_min, float(np.percentile(y, 1)))
+        y_max = max(y_max, float(np.percentile(y, 99)))
+
+        if pc.velocity is not None:
+            v_min = min(v_min, float(np.percentile(pc.velocity, 1)))
+            v_max = max(v_max, float(np.percentile(pc.velocity, 99)))
+
+    def pad(lo, hi):
+        margin = (hi - lo) * 0.1
+        return lo - margin, hi + margin
+
+    lim = {
+        "az": pad(az_min, az_max),
+        "v": pad(v_min, v_max) if v_min < np.inf else (-10, 10),
+        "x": pad(x_min, x_max),
+        "y": pad(y_min, y_max),
+    }
+    zoom_r = 30
+    lim["x_zoom"] = (-zoom_r, zoom_r)
+    lim["y_zoom"] = (-zoom_r, zoom_r)
+    return lim
+
+
+def _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img,
+                    frame_idx, n_frames, lim):
+    """Clear axes and redraw a single MOS frame with fixed axis limits."""
+    ax_cam, ax_bev, ax_vel, ax_zoom = axes
+
+    for ax in axes:
+        ax.clear()
+
+    x, y = pc.xyz[:, 0], pc.xyz[:, 1]
+    azimuth_deg = np.degrees(np.arctan2(y, x))
+    static = ~is_moving
+
+    # ── Top-left: Camera
+    if camera_img is not None:
+        ax_cam.imshow(camera_img)
+    ax_cam.set_title("Stereo Left Camera", fontsize=9)
+    ax_cam.axis("off")
+
+    # ── Top-right: BEV full
+    ax_bev.scatter(x[static], y[static],
+                   s=0.3, c="#999999", alpha=0.4, rasterized=True)
+    ax_bev.scatter(x[is_moving], y[is_moving],
+                   s=3, c="#e63333", alpha=0.7, rasterized=True)
+    ax_bev.set_xlim(lim["x"])
+    ax_bev.set_ylim(lim["y"])
+    ax_bev.set_xlabel("x, m")
+    ax_bev.set_ylabel("y, m")
+    ax_bev.set_title("Bird's-eye view", fontsize=9)
+    ax_bev.set_aspect("equal")
+    ax_bev.grid(True, alpha=0.3)
+
+    # ── Bottom-left: Velocity vs Azimuth
+    if pc.velocity is not None:
+        v = pc.velocity
+        ax_vel.scatter(azimuth_deg[static], v[static],
+                       s=0.4, c="#999999", alpha=0.5, rasterized=True)
+        ax_vel.scatter(azimuth_deg[is_moving], v[is_moving],
+                       s=3, c="#e63333", alpha=0.7, rasterized=True)
+        if ego_params is not None:
+            a_sweep = np.linspace(lim["az"][0], lim["az"][1], 500)
+            vr = -ego_params[0] * np.cos(np.radians(a_sweep)) \
+                 - ego_params[1] * np.sin(np.radians(a_sweep))
+            ax_vel.plot(a_sweep, vr, "k-", lw=1.5)
+
+            ego_speed = float(np.sqrt(ego_params[0] ** 2 + ego_params[1] ** 2))
+            ax_vel.text(
+                0.98, 0.97, f"|V_ego| = {ego_speed:.2f} m/s",
+                transform=ax_vel.transAxes, ha="right", va="top",
+                fontsize=10, fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
+            )
+    ax_vel.set_xlim(lim["az"])
+    ax_vel.set_ylim(lim["v"])
+    ax_vel.set_xlabel("azimuth, deg")
+    ax_vel.set_ylabel("radial velocity, m/s")
+    ax_vel.set_title("Radial velocity vs Azimuth", fontsize=9)
+    ax_vel.grid(True, alpha=0.3)
+
+    # ── Bottom-right: BEV zoom
+    ax_zoom.scatter(x[static], y[static],
+                    s=0.5, c="#999999", alpha=0.4, rasterized=True)
+    ax_zoom.scatter(x[is_moving], y[is_moving],
+                    s=4, c="#e63333", alpha=0.7, rasterized=True)
+    ax_zoom.set_xlim(lim["x_zoom"])
+    ax_zoom.set_ylim(lim["y_zoom"])
+    ax_zoom.set_xlabel("x, m")
+    ax_zoom.set_ylabel("y, m")
+    ax_zoom.set_title("BEV (near range)", fontsize=9)
+    ax_zoom.set_aspect("equal")
+    ax_zoom.grid(True, alpha=0.3)
+
+    n_mov = int(is_moving.sum())
+    n_tot = len(is_moving)
+    fig.suptitle(
+        f"Frame {frame_idx + 1}/{n_frames}  |  "
+        f"moving {n_mov}/{n_tot} ({100 * n_mov / n_tot:.1f}%)",
+        fontsize=12, y=0.98,
+    )
+
+
+def render_mos_sequence(
+    bin_files: list,
+    loader_fn,
+    segmenter,
+    output_dir: str,
+    camera_dir: "str | None" = None,
+    inlier_threshold: float = 0.5,
+    dpi: int = 120,
+) -> None:
+    """
+    Покадровый рендеринг MOS-результатов в PNG (2x2: camera, BEV, velocity, BEV-zoom).
+
+    Parameters:
+        bin_files         : отсортированный список путей к .bin кадрам
+        loader_fn         : функция загрузки кадра (path -> PointCloud)
+        segmenter         : MotionSegmenter (уже загруженный, если нужна модель)
+        output_dir        : папка для сохранения PNG
+        camera_dir        : папка stereo_left с .png кадрами камеры (или None)
+        inlier_threshold  : RANSAC порог [m/s]
+        dpi               : DPI сохраняемых изображений
+    """
+    import matplotlib.image as mpimg
+    from src.motion_segmentation import ransac_ego_motion
+
+    _os.makedirs(output_dir, exist_ok=True)
+
+    cam_index = []
+    if camera_dir:
+        cam_index = _build_camera_index(camera_dir)
+        print(f"Найдено кадров камеры: {len(cam_index)}")
+
+    print("Вычисляю диапазоны осей...")
+    lim = _compute_fixed_limits(bin_files, loader_fn)
+    print(f"  azimuth: [{lim['az'][0]:.0f}, {lim['az'][1]:.0f}] deg")
+    print(f"  velocity: [{lim['v'][0]:.1f}, {lim['v'][1]:.1f}] m/s")
+    print(f"  BEV x: [{lim['x'][0]:.0f}, {lim['x'][1]:.0f}] m")
+    print(f"  BEV y: [{lim['y'][0]:.0f}, {lim['y'][1]:.0f}] m")
+
+    fig, ((ax_cam, ax_bev), (ax_vel, ax_zoom)) = plt.subplots(
+        2, 2, figsize=(14, 9),
+        gridspec_kw={"hspace": 0.35, "wspace": 0.3},
+    )
+    axes = (ax_cam, ax_bev, ax_vel, ax_zoom)
+
+    n = len(bin_files)
+    for i, bin_path in enumerate(bin_files):
+        pc = loader_fn(bin_path)
+        [is_moving] = segmenter.segment_frames([pc])
+
+        ego_params = None
+        if pc.velocity is not None:
+            ego_params, _ = ransac_ego_motion(pc, inlier_threshold=inlier_threshold)
+
+        camera_img = None
+        if cam_index:
+            stem = _os.path.splitext(_os.path.basename(bin_path))[0]
+            if stem.isdigit():
+                img_path = _find_closest_camera(cam_index, int(stem))
+                if img_path:
+                    camera_img = mpimg.imread(img_path)
+
+        _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img, i, n, lim)
+
+        out_path = _os.path.join(output_dir, f"{i:06d}.png")
+        fig.savefig(out_path, dpi=dpi)
+        print(f"\r[{i + 1}/{n}] saved {out_path}", end="", flush=True)
+
+    plt.close(fig)
+    print(f"\n\nГотово! {n} кадров сохранено в {output_dir}/")
+    print(f"\nСобрать GIF:   magick convert -delay 10 -loop 0 {output_dir}/*.png mos.gif")
+    print(f"Собрать видео: ffmpeg -framerate 10 -i {output_dir}/%06d.png -c:v libx264 -pix_fmt yuv420p mos.mp4")

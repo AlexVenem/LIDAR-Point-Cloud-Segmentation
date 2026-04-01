@@ -71,6 +71,12 @@ def main() -> None:
                              "Ближайший по временной метке кадр добавляется к MOS-графику.")
     parser.add_argument("--gpu", action="store_true",
                         help="Использовать GPU (XGBoost CUDA) вместо CPU (Random Forest) для обучения MOS")
+    parser.add_argument("--aeva", type=str, required=False,
+                        help="Папка с .bin кадрами Aeva для mos-sequence (например 03_Day/Aeva)")
+    parser.add_argument("--dpi", type=int, required=False, default=120,
+                        help="DPI сохраняемых PNG для mos-sequence (по умолчанию: 120)")
+    parser.add_argument("--start", type=int, required=False, default=0,
+                        help="Начальный индекс кадра для mos-sequence (по умолчанию: 0)")
 
     args = parser.parse_args()
 
@@ -162,9 +168,45 @@ def main() -> None:
         return
 
     if args.action == "mos-sequence":
-        from src.motion_segmentation import MotionSegmenter, cluster_moving_objects
+        import glob as _glob
+        from src.motion_segmentation import MotionSegmenter
+
+        # ── Hercules / Aeva: покадровый рендеринг в PNG ──────────────────
+        if args.dataset == "hercules" and args.aeva:
+            from src.datasets.hercules import load_hercules_aeva
+            from src.viz.plots import render_mos_sequence
+
+            bin_files = sorted(_glob.glob(os.path.join(args.aeva, "*.bin")))
+            if not bin_files:
+                print(f"Ошибка: .bin файлов не найдено в {args.aeva}")
+                return
+
+            bin_files = bin_files[args.start:]
+            if args.max_frames is not None:
+                bin_files = bin_files[:args.max_frames]
+            print(f"Кадров для обработки: {len(bin_files)}")
+
+            seg = MotionSegmenter(threshold=args.threshold,
+                                  inlier_threshold=args.inlier_threshold,
+                                  use_gpu=args.gpu)
+            if args.model and os.path.exists(args.model):
+                seg.load(args.model)
+
+            output_dir = args.output if args.output != GPS_MAP_FILE else "output/mos_frames"
+            render_mos_sequence(
+                bin_files=bin_files,
+                loader_fn=load_hercules_aeva,
+                segmenter=seg,
+                output_dir=output_dir,
+                camera_dir=args.camera,
+                inlier_threshold=args.inlier_threshold,
+                dpi=args.dpi,
+            )
+            return
+
+        # ── HeLiMOS: temporal sequence segmentation ──────────────────────
+        from src.motion_segmentation import cluster_moving_objects
         from src.datasets.helimos import load_helimos_sequence
-        from src.viz.clouds import visualize_mos
 
         data_root = args.sequence or "data/Deskewed_LiDAR"
         seg = MotionSegmenter(threshold=args.threshold, inlier_threshold=args.inlier_threshold, use_gpu=args.gpu)
@@ -196,10 +238,6 @@ def main() -> None:
         total_pts = sum(len(m) for m in is_moving_list)
         print(f"Frames: {len(frames)} | Moving: {total_moving}/{total_pts} "
               f"({100*total_moving/total_pts:.1f}%)")
-
-        # 3D визуализация сегментации кадров: без данных с камеры особо нет смысла
-        # visualize_mos(frames, is_moving_list, cluster_ids_list,
-        #               window_name=f"MOS — {len(frames)} frames")
         return
 
     # Стандартные действия по датасетам
