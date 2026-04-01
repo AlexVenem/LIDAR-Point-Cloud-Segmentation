@@ -107,7 +107,7 @@ def ransac_ego_motion(
         params, *_ = np.linalg.lstsq(A[best_inliers], v_r[best_inliers], rcond=None)
         residuals = np.abs(A @ params - v_r)
         is_static = residuals < inlier_threshold
-    else:  # терминальное условие, если RANSAC не нашел лучшей модели (все точки объявляются статическими и собственная скорость авто = 0 - рискованно)
+    else:
         params = np.zeros(2)
         is_static = np.ones(n_pts, dtype=bool)
 

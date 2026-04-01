@@ -151,14 +151,16 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
 
     ins_mask = ts_ins_rel >= t_start
     ts_ins_plot    = ts_ins_rel[ins_mask] - t_start
-    speed_ins_plot = uniform_filter1d(speed_ins[ins_mask], size=5)
+    speed_ins_plot = uniform_filter1d(speed_ins[ins_mask], size=3)
     yaw_rate_plot  = yaw_rate[ins_mask]
 
-    # ── Aeva ego-velocity (RANSAC per frame, с кэшированием) ────────────
+    # Aeva ego-velocity (RANSAC per frame, с кэшированием)
     plot_t_min, plot_t_max = 100, 250
 
     ts_aeva_plot = None
     speed_aeva_plot = None
+    ts_icp_plot = None
+    yaw_rate_icp_plot = None
     if aeva_path:
         cache_path = _os.path.join(aeva_path, "aeva_ego_cache.npz")
 
@@ -204,11 +206,101 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
             speed_aeva_plot = speed_aeva[mask]
             print(f"[Aeva] На графике: {int(mask.sum())} кадров")
 
-    # Построение
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
-    fig.subplots_adjust(wspace=0.35, bottom=0.13)
+        # ICP yaw rate между последовательными кадрами
+        import open3d as o3d
+        from src.datasets.hercules import load_hercules_aeva
 
-    ax1 = axes[0]
+        bin_files = sorted(_glob.glob(_os.path.join(aeva_path, "*.bin")))
+        bin_files = [bf for bf in bin_files
+                     if _os.path.splitext(_os.path.basename(bf))[0].isdigit()]
+
+        # Фильтруем только кадры в окне графика
+        icp_files = []
+        icp_ts = []
+        for bf in bin_files:
+            stem = _os.path.splitext(_os.path.basename(bf))[0]
+            t_rel = int(stem) / 1e9 - t0 - t_start
+            if plot_t_min <= t_rel <= plot_t_max:
+                icp_files.append(bf)
+                icp_ts.append(t_rel)
+        icp_ts = np.array(icp_ts)
+
+        if len(icp_files) > 1:
+            voxel_size = 0.5
+            yaw_rates = []
+            ts_mid = []
+            prev_pcd = None
+            for i, bf in enumerate(icp_files):
+                pc = load_hercules_aeva(bf)
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = o3d.utility.Vector3dVector(pc.xyz)
+                pcd = pcd.voxel_down_sample(voxel_size)
+
+                if prev_pcd is not None:
+                    dt = icp_ts[i] - icp_ts[i - 1]
+                    if dt > 0:
+                        result = o3d.pipelines.registration.registration_icp(
+                            pcd, prev_pcd, max_correspondence_distance=1.0,
+                            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+                            criteria=o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=30),
+                        )
+                        R = result.transformation[:3, :3]
+                        yaw = np.arctan2(R[1, 0], R[0, 0])
+                        yaw_rates.append(-np.degrees(yaw) / dt)
+                        ts_mid.append((icp_ts[i] + icp_ts[i - 1]) / 2)
+
+                prev_pcd = pcd
+                if (i + 1) % 100 == 0:
+                    print(f"\r[ICP] {i + 1}/{len(icp_files)}", end="", flush=True)
+
+            if yaw_rates:
+                print(f"\n[ICP] Готово: {len(yaw_rates)} пар")
+                ts_icp_plot = np.array(ts_mid)
+                yaw_rate_icp_raw = np.array(yaw_rates)
+                yaw_rate_icp_plot = uniform_filter1d(yaw_rate_icp_raw, size=5)
+
+    # Детекция пиков угловой скорости (только N самых выраженных)
+    from scipy.signal import find_peaks
+    import contextily as ctx
+
+    MAX_PEAKS = 5
+
+    window_mask = (ts_ins_plot >= plot_t_min) & (ts_ins_plot <= plot_t_max)
+    yr_abs = np.abs(yaw_rate_plot[window_mask])
+    ts_window = ts_ins_plot[window_mask]
+
+    peak_indices, peak_props = find_peaks(yr_abs, prominence=2.0, distance=80)
+
+    # Оставляем только MAX_PEAKS самых выраженных по prominence
+    if len(peak_indices) > MAX_PEAKS:
+        top = np.argsort(peak_props["prominences"])[-MAX_PEAKS:]
+        top = np.sort(top)  # сохраняем хронологический порядок
+        peak_indices = peak_indices[top]
+
+    # INS lat/lon (под ins_mask)
+    lat_ins = ins_raw["latitude"].values[ins_mask]
+    lon_ins = ins_raw["longitude"].values[ins_mask]
+
+    peak_times = ts_window[peak_indices]
+    peak_yaw = yaw_rate_plot[window_mask][peak_indices]
+    peak_lat = np.interp(peak_times, ts_ins_plot, lat_ins)
+    peak_lon = np.interp(peak_times, ts_ins_plot, lon_ins)
+
+    # Траектория в пределах окна графика
+    traj_t = np.linspace(plot_t_min, plot_t_max, 500)
+    traj_lat = np.interp(traj_t, ts_ins_plot, lat_ins)
+    traj_lon = np.interp(traj_t, ts_ins_plot, lon_ins)
+
+    _peak_colors = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4"]
+
+    # Построение (2 строки: верх — скорость + yaw rate, низ — карта)
+    fig = plt.figure(figsize=(14, 11))
+    gs = fig.add_gridspec(2, 2, height_ratios=[0.8, 1.2], hspace=0.30, wspace=0.35)
+    ax1 = fig.add_subplot(gs[0, 0])
+    ax2 = fig.add_subplot(gs[0, 1])
+    ax3 = fig.add_subplot(gs[1, :])
+
+    # Скорость
     ax1.scatter(ts_gps_plot, speed_gps_plot, s=4, c="red", alpha=0.6, zorder=2, label="GPS")
     ax1.plot(ts_ins_plot, speed_ins_plot, "k-", linewidth=1.5, zorder=3, label="ИНС")
     if ts_aeva_plot is not None and len(ts_aeva_plot) > 0:
@@ -216,7 +308,7 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
                     zorder=4, label="Aeva (RANSAC)")
     ax1.set_xlabel("время, с", fontsize=11)
     ax1.set_ylabel("скорость, м/с", fontsize=11)
-    ax1.set_xlim(100, 250)
+    ax1.set_xlim(plot_t_min, plot_t_max)
     ax1.set_ylim(0, 10)
     ax1.grid(True, linestyle="--", alpha=0.5)
     ax1.legend(fontsize=10, loc="upper right")
@@ -224,18 +316,67 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
     ax1.set_title(f"Скорость (м/с) от времени (с) (GPS + INS{title_suffix})",
                   loc="left", fontsize=11, fontweight="bold")
 
-    ax2 = axes[1]
-    ax2.plot(ts_ins_plot, yaw_rate_plot, "k.", markersize=1.5, zorder=2)
+    # Угловая скорость + пронумерованные пики
+    ax2.plot(ts_ins_plot, yaw_rate_plot, "k.", markersize=1.5, zorder=2, label="ИНС")
+    if ts_icp_plot is not None and len(ts_icp_plot) > 0:
+        ax2.plot(ts_icp_plot, yaw_rate_icp_plot, "b-", linewidth=1.5,
+                 alpha=0.7, zorder=3, label="Aeva (ICP)")
+    for j, (pt, py) in enumerate(zip(peak_times, peak_yaw)):
+        color = _peak_colors[j % len(_peak_colors)]
+        ax2.plot(pt, py, "o", color=color, markersize=9, zorder=5,
+                 markeredgecolor="white", markeredgewidth=0.8)
+        ax2.annotate(
+            str(j + 1), (pt, py),
+            textcoords="offset points", xytext=(5, 8),
+            fontsize=11, fontweight="bold", color=color, zorder=6,
+        )
     ax2.set_xlabel("время, с", fontsize=11)
     ax2.set_ylabel("угол, град/с", fontsize=11)
-    ax2.set_xlim(100, 250)
+    ax2.set_xlim(plot_t_min, plot_t_max)
     ax2.axhline(0, color="gray", linewidth=0.8)
     ax2.grid(True, linestyle="--", alpha=0.5)
-    ax2.set_title("Угол (град) от времени (с)", loc="left", fontsize=11, fontweight="bold")
+    ax2.legend(fontsize=10, loc="upper right")
+    ax2.set_title("Угловая скорость рыскания (°/с)", loc="left", fontsize=11, fontweight="bold")
+
+    # Карта с траекторией и пронумерованными поворотами
+    ax3.plot(traj_lon, traj_lat, "-", color="#e63333", linewidth=2.5,
+             alpha=0.85, zorder=3, label="траектория")
+    ax3.plot(traj_lon[0], traj_lat[0], "s", color="#00aa00",
+             markersize=10, zorder=5, markeredgecolor="white",
+             markeredgewidth=1.2, label="старт")
+    ax3.plot(traj_lon[-1], traj_lat[-1], "s", color="#cc0000",
+             markersize=10, zorder=5, markeredgecolor="white",
+             markeredgewidth=1.2, label="конец")
+    for j, (plat, plon) in enumerate(zip(peak_lat, peak_lon)):
+        color = _peak_colors[j % len(_peak_colors)]
+        ax3.plot(plon, plat, "o", color=color, markersize=13, zorder=6,
+                 markeredgecolor="white", markeredgewidth=1.5)
+        ax3.annotate(
+            str(j + 1), (plon, plat),
+            ha="center", va="center",
+            fontsize=9, fontweight="bold", color="white", zorder=7,
+        )
+
+    # Подложка карты (OpenStreetMap)
+    try:
+        ctx.add_basemap(ax3, crs="EPSG:4326",
+                        source=ctx.providers.OpenStreetMap.Mapnik)
+    except Exception as e:
+        print(f"[Карта] Не удалось загрузить тайлы: {e}")
+
+    ax3.set_xlabel("долгота", fontsize=11)
+    ax3.set_ylabel("широта", fontsize=11)
+    ax3.legend(fontsize=9, loc="upper right")
+    ax3.set_title("Траектория с местами поворотов", loc="left", fontsize=11, fontweight="bold")
 
     _os.makedirs(_os.path.dirname(output_path), exist_ok=True)
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     print(f"График сохранён: {output_path}")
+    print(f"Отмечено пиков: {len(peak_times)}")
+    for j, (pt, py, plat, plon) in enumerate(
+            zip(peak_times, peak_yaw, peak_lat, peak_lon)):
+        print(f"  #{j+1}: t={pt:.1f}с, yaw_rate={py:.1f}°/с, "
+              f"lat={plat:.6f}, lon={plon:.6f}")
     plt.show()
 
 
