@@ -19,20 +19,20 @@ MOVING_LABEL = 251  # moving object
 # Feature extraction
 def _extract_features(pc: PointCloud) -> np.ndarray:
     """
-    Extract per-point feature matrix from a PointCloud.
+    Извлечь матрицу признаков для каждой точки из облака точек.
 
     Feature columns
     ---------------
     0: x   1: y   2: z
-    3: range (3-D distance from sensor)
+    3: range (3D расстояние от сенсора)
     4: azimuth   [rad]
     5: elevation [rad]
-    6: intensity  (0 if unavailable)
-    7: radial velocity (only present when pc.velocity is not None)
+    6: intensity  (0 если нет)
+    7: radial velocity (только если pc.velocity не None)
 
     Returns
     -------
-    ndarray of shape (N, 7) or (N, 8)
+    ndarray (N, 7) или (N, 8)
     """
     x, y, z = pc.xyz[:, 0], pc.xyz[:, 1], pc.xyz[:, 2]
     xy = np.sqrt(x ** 2 + y ** 2)
@@ -56,25 +56,17 @@ def ransac_ego_motion(
     seed: int = 0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Estimate ego-velocity from per-point Doppler data with RANSAC.
-
-    Model:
-    For a stationary object seen at azimuth α:
-
-        v_r(α) = −V_x · cos(α) − V_y · sin(α)
-
-    This is linear in the unknown ego-velocity [V_x, V_y].
-    Moving objects violate this model and produce large residuals.
+    Оценивает ego-velocity с помощью радиальных скоростей объектов и RANSAC.
 
     Parameters:
-        pc               : PointCloud with non-None velocity
-        n_iterations     : RANSAC iterations
-        inlier_threshold : residual threshold [m/s] to label a point as static
-        seed             : RNG seed for reproducibility
+        pc               : PointCloud с не-None радиальными скоростями
+        n_iterations     : кол-во RANSAC итераций
+        inlier_threshold : порог для отнесения точки к стационарной
+        seed             : RNG seed для воспроизведения
 
     Returns:
-        ego_params : np.ndarray, shape (2,) — estimated [V_x, V_y]
-        is_static  : bool ndarray, shape (N,) — True for static points
+        params     : np.ndarray, shape (2,) — оцененные [V_x, V_y]
+        is_static  : bool ndarray, shape (N,) — True для стационарных точек
     """
     assert pc.velocity is not None, "RANSAC requires per-point Doppler velocity."
 
@@ -82,7 +74,6 @@ def ransac_ego_motion(
     alpha = np.arctan2(y, x)
     v_r = pc.velocity.astype(np.float64)
 
-    # Design matrix:  v_r = [-cos α, -sin α] @ [Vx, Vy]
     A = np.column_stack([-np.cos(alpha), -np.sin(alpha)])
 
     rng = np.random.default_rng(seed)
@@ -196,26 +187,17 @@ def temporal_consistency_segment(
 def cluster_moving_objects(
     pc: PointCloud,
     is_moving: np.ndarray,
-    eps: float = 1.5,
-    min_samples: int = 5,
-    velocity_weight: float = 2.0,
+    eps_xyz: float = 1.0,
+    eps_vr: float = 1.0,
+    min_samples: int = 4,
+    two_stage: bool = True,
 ) -> np.ndarray:
     """
-    Cluster moving points into individual objects with DBSCAN.
-
-    Parameters:
-        pc              : source PointCloud
-        is_moving       : bool mask (True = moving)
-        eps             : DBSCAN neighbourhood radius [m]
-        min_samples     : minimum cluster size
-        velocity_weight : weight applied to the velocity channel when building
-                      the feature space (higher = velocity matters more)
+    DBSCAN-кластеризация движущихся точек.
 
     Returns:
-        cluster_ids : int32 array, shape (N,).
-                  -2  -> static point
-                  -1  -> moving noise (no cluster)
-                  ≥0  -> object cluster index
+        cluster_ids : int32 ndarray (N,)
+            -2 -> static, -1 -> noise среди moving, ≥0 -> id кластера
     """
     cluster_ids = np.full(len(is_moving), -2, dtype=np.int32)
     moving_idx = np.where(is_moving)[0]
@@ -223,40 +205,94 @@ def cluster_moving_objects(
     if len(moving_idx) < min_samples:
         return cluster_ids
 
-    pts = pc.xyz[moving_idx, :2].astype(np.float32)     # x, y
+    # Сначала помечаем все moving точки как noise (-1)
+    cluster_ids[moving_idx] = -1
 
-    if pc.velocity is not None:
-        vel = pc.velocity[moving_idx].reshape(-1, 1).astype(np.float32)
-        pts = np.hstack([pts, vel * velocity_weight])
+    xyz_mov = pc.xyz[moving_idx].astype(np.float64)
+    has_vel = pc.velocity is not None
+    vel_mov = pc.velocity[moving_idx].astype(np.float64) if has_vel else None
 
-    db = DBSCAN(eps=eps, min_samples=min_samples, algorithm="ball_tree", n_jobs=-1)
-    labels = db.fit_predict(pts)
+    if two_stage and has_vel:
+        labels = _two_stage_dbscan(
+            xyz_mov, vel_mov, eps_xyz, min_samples, eps_vr,
+        )
+    else:
+        # Single-stage: 4D (xyz + Vr*weight). Чтобы Vr и xyz «жили» в одном
+        # пространстве с понятным eps, домножаем Vr на eps_xyz/eps_vr.
+        if has_vel:
+            vr_scale = eps_xyz / max(eps_vr, 1e-6)
+            features = np.column_stack([xyz_mov, vel_mov * vr_scale])
+        else:
+            features = xyz_mov
+        db = DBSCAN(eps=eps_xyz, min_samples=min_samples, n_jobs=-1)
+        labels = db.fit_predict(features)
+
     cluster_ids[moving_idx] = labels.astype(np.int32)
-
     return cluster_ids
+
+
+def _two_stage_dbscan(
+    xyz: np.ndarray,
+    vel: np.ndarray,
+    eps_xyz: float,
+    min_samples: int,
+    eps_vr: float,
+) -> np.ndarray:
+    """
+    Двухэтапный DBSCAN в физических единицах.
+
+    Этап 1: кластеризация по Vr [m/s] с eps=eps_vr.
+    Этап 2: внутри каждой группы Vr — пространственная кластеризация по xyz [m]
+            с eps=eps_xyz.
+    """
+    n = len(xyz)
+    labels = np.full(n, -1, dtype=np.int32)
+
+    # Этап 1: кластеризация по Vr (в м/с)
+    db_vel = DBSCAN(eps=eps_vr, min_samples=min_samples, n_jobs=-1)
+    vel_labels = db_vel.fit_predict(vel.reshape(-1, 1))
+
+    next_cluster = 0
+    for vl in sorted(set(vel_labels)):
+        if vl == -1:
+            continue
+        idx = np.where(vel_labels == vl)[0]
+        if len(idx) < min_samples:
+            continue
+
+        # Этап 2: пространственная кластеризация (в метрах)
+        db_xyz = DBSCAN(eps=eps_xyz, min_samples=min_samples, n_jobs=-1)
+        sub_labels = db_xyz.fit_predict(xyz[idx])
+
+        for sl in sorted(set(sub_labels)):
+            if sl == -1:
+                continue
+            sub_mask = sub_labels == sl
+            labels[idx[sub_mask]] = next_cluster
+            next_cluster += 1
+
+    return labels
 
 
 # MotionSegmenter – main class
 class MotionSegmenter:
     """
-    Moving Object Segmentation for LiDAR point clouds.
+    Moving Object Segmentation для облака точек лидара.
 
-    Two inference backends (auto-selected):
-    - Doppler RANSAC  if all input frames have per-point velocity.
-    - Random Forest   otherwise (requires prior call to train_on_helimos /
-                      load).
-    - XGBoost         if it uses GPU
+    - RANSAC, если все кадры в данных имеют радиальную скорость.
+    - Random Forest, иначе (требуется предварительный вызов train_on_helimos / load).
+    - XGBoost, если надо GPU
     """
 
     def __init__(self, threshold: float = 0.85, inlier_threshold: float = 0.5,
-                 use_gpu: bool = False) -> None:
+                 use_gpu: bool = False) -> None: # значения хардкодом вынести в константы конфига
         self.classifier: Optional[RandomForestClassifier] = None
         self.scaler: Optional[StandardScaler] = None
         self.threshold = threshold  # P(moving) выше этого -> moving
-        self.inlier_threshold = inlier_threshold  # RANSAC residual threshold [m/s]
+        self.inlier_threshold = inlier_threshold  # порог для RANSAC [m/s]
         self.use_gpu = use_gpu
 
-    # ── Training ─────────────────────────────────────────────────────────────
+    # Training
     def train_on_helimos(
         self,
         data_root: str,
@@ -265,13 +301,13 @@ class MotionSegmenter:
         max_frames: Optional[int] = None,
     ) -> None:
         """
-        Train a Random Forest (or XGBoost for GPU) classifier on HeLiMOS labelled data.
+        Обучение Random Forest (или XGBoost для GPU) классификатора на HeLiMOS размеченных данных.
 
         Parameters:
-            data_root  : path to Deskewed_LiDAR root (contains train.txt etc.)
+            data_root  : путь к Deskewed_LiDAR корню (содержит train.txt и др.)
             sensor     : 'Velodyne', 'Ouster', 'Avia', or 'Aeva'
             split      : 'train', 'val', or 'test'
-            max_frames : limit frames used (None = use all)
+            max_frames : ограничение на используемые кадры (None = использовать все)
         """
         split_file = os.path.join(data_root, f"{split}.txt")
         with open(split_file) as f:
@@ -281,8 +317,8 @@ class MotionSegmenter:
             frame_ids = frame_ids[:max_frames]
 
         sensor_dir = os.path.join(data_root, sensor)
-        vel_dir = os.path.join(sensor_dir, "velodyne")
-        lbl_dir = os.path.join(sensor_dir, "labels")
+        vel_dir = os.path.join(sensor_dir, "velodyne") # путь к bin файлам
+        lbl_dir = os.path.join(sensor_dir, "labels") # путь к меткам
 
         all_feats: List[np.ndarray] = []
         all_labels: List[np.ndarray] = []
@@ -297,16 +333,16 @@ class MotionSegmenter:
                 skipped += 1
                 continue
 
-            pc = read_kitti_bin(bin_path)
-            semantic, _ = read_label(lbl_path)
+            pc = read_kitti_bin(bin_path) # получаем облако точек из bin файла
+            semantic, _ = read_label(lbl_path) # получаем метки этих точек
 
-            mask = (semantic == STATIC_LABEL) | (semantic == MOVING_LABEL)
+            mask = (semantic == STATIC_LABEL) | (semantic == MOVING_LABEL) # убираем кадры, где все точки - мусор
             if mask.sum() == 0:
                 skipped += 1
                 continue
 
-            all_feats.append(_extract_features(pc)[mask])
-            all_labels.append((semantic[mask] == MOVING_LABEL).astype(np.int8))
+            all_feats.append(_extract_features(pc)[mask]) # берем фичи только не мусора
+            all_labels.append((semantic[mask] == MOVING_LABEL).astype(np.int8)) 
 
             if (i + 1) % 200 == 0:
                 print(f"  {i + 1}/{len(frame_ids)} frames …")
@@ -325,14 +361,14 @@ class MotionSegmenter:
 
         # Субсэмплинг: берём не более max_train_points с сохранением
         # баланса классов (все moving + случайная выборка static)
-        max_train_points = 2_000_000
+        max_train_points = 2_000_000 # возможно, стоит вынести в константу конфига
         if len(X) > max_train_points:
             moving_idx = np.where(y == 1)[0]
             static_idx = np.where(y == 0)[0]
 
             # Берём все moving точки (их мало)
             n_moving = len(moving_idx)
-            n_static_budget = max_train_points - n_moving
+            n_static_budget = max_train_points - n_moving # сколько стационарных точек будем брать
             if n_static_budget < n_moving:
                 n_static_budget = n_moving  # как минимум 1:1
 
@@ -345,7 +381,7 @@ class MotionSegmenter:
             X = X[keep]
             y = y[keep]
             print(
-                f"[MOS] Subsampled → {len(X):,} points "
+                f"[MOS] Subsampled -> {len(X):,} points "
                 f"({(y == 1).sum():,} moving + {(y == 0).sum():,} static)"
             )
 
@@ -375,15 +411,15 @@ class MotionSegmenter:
             bar = "█" * int(imp * 50)
             print(f"  {name:10s} {imp:.3f}  {bar}")
 
-    # ── GPU (XGBoost) ────────────────────────────────────────────────────────
+    # GPU (XGBoost)
     @staticmethod
     def _make_xgb_classifier(X_sc: np.ndarray, y: np.ndarray):
-        """Create and train an XGBClassifier on GPU (CUDA)."""
+        """Обучение с помощью XGBClassifier на GPU (CUDA)."""
         import xgboost as xgb
 
         n_pos = int((y == 1).sum())
         n_neg = int((y == 0).sum())
-        scale = n_neg / max(n_pos, 1)
+        scale = n_neg / max(n_pos, 1)  # для баланса классов, усиливает вклад ошибок по редкому классу 
 
         clf = xgb.XGBClassifier(
             n_estimators=300,
@@ -400,47 +436,46 @@ class MotionSegmenter:
         clf.fit(X_sc, y)
         return clf
 
-    # ── Inference ─────────────────────────────────────────────────────────────
+    # Inference
+    def segment_frame(
+        self,
+        pc: PointCloud,
+    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """
+        Классифицирует точки одного кадра как moving (True) или static (False).
+        - pc имеет .velocity  ->  RANSAC ego-motion
+        - иначе               ->  Random Forest (должен быть загружен) или XGBoost (GPU)
+
+        Returns:
+            is_moving  : bool ndarray, True = moving
+            ego_params : (V_x, V_y) от RANSAC, либо None если использовался классификатор
+        """
+        if pc.velocity is not None:
+            ego_params, is_static = ransac_ego_motion(
+                pc, inlier_threshold=self.inlier_threshold
+            )
+            return ~is_static, ego_params
+
+        if self.classifier is None:
+            raise RuntimeError(
+                "No model loaded and no Doppler velocity available.\n"
+                "Run train_on_helimos() or load() first."
+            )
+        feats = _extract_features(pc)
+        feats_sc = self.scaler.transform(feats)
+        proba = self.classifier.predict_proba(feats_sc)[:, 1]
+        return proba > self.threshold, None
+
     def segment_frames(
         self,
         frames: List[PointCloud],
     ) -> List[np.ndarray]:
         """
-        Classify each point in each frame as moving (True) or static (False).
-
-        Backend selection:
-        - All frames have .velocity  ->  RANSAC ego-motion (no model needed)
-        - Otherwise                  ->  Random Forest (model must be loaded) or XGBoost (if it uses GPU)
-
-        Parameters:
-            frames : one or more PointCloud objects
-
-        Returns:
-            List of bool arrays, one per frame, True = moving.
+        Батч-вариант segment_frame. Возвращает только маски moving;
+        ego-motion отбрасывается. Если нужны и `ego_params` - вызывайте
+        `segment_frame` напрямую.
         """
-        if not frames:
-            return []
-
-        use_velocity = all(f.velocity is not None for f in frames)
-
-        if not use_velocity and self.classifier is None:
-            raise RuntimeError(
-                "No model loaded and no Doppler velocity available.\n"
-                "Run train_on_helimos() or load() first."
-            )
-
-        results: List[np.ndarray] = []
-        for pc in frames:
-            if use_velocity:
-                _, is_static = ransac_ego_motion(pc, inlier_threshold=self.inlier_threshold)
-                results.append(~is_static)
-            else:
-                feats = _extract_features(pc)
-                feats_sc = self.scaler.transform(feats)
-                proba = self.classifier.predict_proba(feats_sc)[:, 1]
-                results.append(proba > self.threshold)
-
-        return results
+        return [self.segment_frame(pc)[0] for pc in frames]
 
     def segment_sequence(
         self,
@@ -475,9 +510,9 @@ class MotionSegmenter:
         # Intersection: moving if temporal AND per-frame classifier agree
         return [t & p for t, p in zip(temporal, per_frame)]
 
-    # ── Persistence ───────────────────────────────────────────────────────────
+    # Persistence
     def save(self, path: str) -> None:
-        """Persist trained model to disk."""
+        """Сохранить обученную модель на диск."""
         if self.classifier is None:
             raise RuntimeError("Train the model before saving.")
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)

@@ -495,19 +495,13 @@ def plot_imu_accel(imu_df: pd.DataFrame) -> None:
 
 
 # MOS 2-D plots
-# Palette matching the Open3D one in clouds.py
-_MOS_PALETTE = [
-    "#ff3333",  # red
-    "#ff9900",  # orange
-    "#ffff00",  # yellow
-    "#00e633",  # green
-    "#00ccff",  # cyan
-    "#9933ff",  # violet
-    "#ff66cc",  # pink
-    "#ccff66",  # lime
-    "#66ccff",  # sky
-    "#ffcc66",  # peach
-]
+
+def _get_cluster_colors(n: int):
+    """Сгенерировать различные цвета для n кластеров, используя tab20 цветовую карту."""
+    if n == 0:
+        return []
+    cmap = plt.cm.get_cmap("tab20", max(n, 1))
+    return [cmap(i) for i in range(n)]
 
 
 def plot_mos(
@@ -516,13 +510,14 @@ def plot_mos(
     ego_params: "np.ndarray | None" = None,
     title: str = "",
     camera_img: "np.ndarray | None" = None,
+    cluster_ids: "np.ndarray | None" = None,
 ) -> None:
     """
     2D-графики MOS-результата (static vs moving) с опциональным кадром камеры.
 
     Панели (без камеры):
       Левый  — radial velocity vs azimuth (только при наличии velocity)
-      Правый — bird's-eye view (x, y)
+      Правый — bird's-eye view (x, y) с раскраской кластеров
 
     Панели (с камерой):
       Верхний ряд — velocity vs azimuth + bird's-eye view
@@ -534,10 +529,15 @@ def plot_mos(
         ego_params  : [Vx, Vy] для отрисовки RANSAC-кривой (опционально)
         title       : заголовок окна
         camera_img  : RGB-массив (H, W, 3) с кадром камеры (опционально)
+        cluster_ids : int32 array (N,), ≥0 = cluster id, -1 = noise, -2 = static
     """
     x, y, z = pc.xyz[:, 0], pc.xyz[:, 1], pc.xyz[:, 2]
     azimuth_deg = np.degrees(np.arctan2(y, x))
     has_velocity = pc.velocity is not None
+    unique_cluster_ids = (
+        np.unique(cluster_ids[cluster_ids >= 0]) if cluster_ids is not None else np.array([], dtype=np.int32)
+    )
+    has_clusters = cluster_ids is not None and len(unique_cluster_ids) > 0
 
     static_mask = ~is_moving
 
@@ -563,6 +563,12 @@ def plot_mos(
     if title:
         fig.suptitle(title, fontsize=13)
 
+    # Cluster colors
+    if has_clusters:
+        n_clusters = len(unique_cluster_ids)
+        cluster_colors = _get_cluster_colors(n_clusters)
+        cid_to_color = {int(cid): cluster_colors[i] for i, cid in enumerate(unique_cluster_ids)}
+
     # Velocity vs Azimuth
     if has_velocity:
         v = pc.velocity
@@ -570,10 +576,27 @@ def plot_mos(
             azimuth_deg[static_mask], v[static_mask],
             s=0.4, c="#999999", alpha=0.5, label="static", rasterized=True,
         )
-        ax_vel.scatter(
-            azimuth_deg[is_moving], v[is_moving],
-            s=3, c="#e63333", alpha=0.7, label="moving", rasterized=True,
-        )
+
+        if has_clusters:
+            # Раскрашиваем moving точки по кластерам
+            noise_mask = is_moving & (cluster_ids < 0)
+            ax_vel.scatter(
+                azimuth_deg[noise_mask], v[noise_mask],
+                s=1.5, c="#e63333", alpha=0.3, label="noise", rasterized=True,
+            )
+            for cid in unique_cluster_ids:
+                cmask = cluster_ids == cid
+                c = cid_to_color[int(cid)]
+                ax_vel.scatter(
+                    azimuth_deg[cmask], v[cmask],
+                    s=4, color=c, alpha=0.8, rasterized=True,
+                )
+        else:
+            ax_vel.scatter(
+                azimuth_deg[is_moving], v[is_moving],
+                s=3, c="#e63333", alpha=0.7, label="moving", rasterized=True,
+            )
+
         if ego_params is not None:
             alpha_sweep = np.linspace(azimuth_deg.min(), azimuth_deg.max(), 500)
             alpha_rad = np.radians(alpha_sweep)
@@ -599,16 +622,42 @@ def plot_mos(
         x[static_mask], y[static_mask],
         s=0.3, c="#999999", alpha=0.4, label="static", rasterized=True,
     )
-    ax_bev.scatter(
-        x[is_moving], y[is_moving],
-        s=3, c="#e63333", alpha=0.7, label="moving", rasterized=True,
-    )
+
+    if has_clusters:
+        noise_mask = is_moving & (cluster_ids < 0)
+        ax_bev.scatter(
+            x[noise_mask], y[noise_mask],
+            s=1, c="#e63333", alpha=0.3, label="noise", rasterized=True,
+        )
+        for cid in unique_cluster_ids:
+            cmask = cluster_ids == cid
+            c = cid_to_color[int(cid)]
+            ax_bev.scatter(
+                x[cmask], y[cmask],
+                s=4, color=c, alpha=0.8, rasterized=True,
+            )
+    else:
+        ax_bev.scatter(
+            x[is_moving], y[is_moving],
+            s=3, c="#e63333", alpha=0.7, label="moving", rasterized=True,
+        )
+
     ax_bev.set_xlabel("x, m")
     ax_bev.set_ylabel("y, m")
     ax_bev.set_title("Bird's-eye view")
     ax_bev.set_aspect("equal")
     ax_bev.legend(loc="upper right", fontsize=8, markerscale=3)
     ax_bev.grid(True, alpha=0.3)
+
+    # Cluster summary
+    if has_clusters:
+        summary = f"{len(unique_cluster_ids)} clusters detected"
+        ax_bev.text(
+            0.02, 0.98, summary,
+            transform=ax_bev.transAxes, ha="left", va="top",
+            fontsize=9, fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
+        )
 
     # Camera image
     if camera_img is not None:
@@ -736,7 +785,8 @@ def _compute_fixed_limits(bin_files, loader_fn, n_probe=20):
 
 
 def _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img,
-                    frame_idx, n_frames, lim):
+                    frame_idx, n_frames, lim,
+                    cluster_ids=None):
     """Clear axes and redraw a single MOS frame with fixed axis limits."""
     ax_cam, ax_bev, ax_vel, ax_zoom = axes
 
@@ -746,6 +796,16 @@ def _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img,
     x, y = pc.xyz[:, 0], pc.xyz[:, 1]
     azimuth_deg = np.degrees(np.arctan2(y, x))
     static = ~is_moving
+    unique_cluster_ids = (
+        np.unique(cluster_ids[cluster_ids >= 0]) if cluster_ids is not None else np.array([], dtype=np.int32)
+    )
+    has_clusters = cluster_ids is not None and len(unique_cluster_ids) > 0
+
+    # Cluster colors
+    if has_clusters:
+        n_clusters = len(unique_cluster_ids)
+        cluster_colors = _get_cluster_colors(n_clusters)
+        cid_to_color = {int(cid): cluster_colors[i] for i, cid in enumerate(unique_cluster_ids)}
 
     # ── Top-left: Camera
     if camera_img is not None:
@@ -753,16 +813,33 @@ def _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img,
     ax_cam.set_title("Stereo Left Camera", fontsize=9)
     ax_cam.axis("off")
 
+    # ── Helper: draw clustered or plain moving points on an axis
+    def _scatter_moving(ax, xvals, yvals):
+        if has_clusters:
+            noise_mask = is_moving & (cluster_ids < 0)
+            ax.scatter(xvals[noise_mask], yvals[noise_mask],
+                       s=1, c="#e63333", alpha=0.3, rasterized=True)
+            for cid in unique_cluster_ids:
+                cmask = cluster_ids == cid
+                c = cid_to_color[int(cid)]
+                ax.scatter(xvals[cmask], yvals[cmask],
+                           s=4, color=c, alpha=0.8, rasterized=True)
+        else:
+            ax.scatter(xvals[is_moving], yvals[is_moving],
+                       s=3, c="#e63333", alpha=0.7, rasterized=True)
+
     # ── Top-right: BEV full
     ax_bev.scatter(x[static], y[static],
                    s=0.3, c="#999999", alpha=0.4, rasterized=True)
-    ax_bev.scatter(x[is_moving], y[is_moving],
-                   s=3, c="#e63333", alpha=0.7, rasterized=True)
+    _scatter_moving(ax_bev, x, y)
     ax_bev.set_xlim(lim["x"])
     ax_bev.set_ylim(lim["y"])
     ax_bev.set_xlabel("x, m")
     ax_bev.set_ylabel("y, m")
-    ax_bev.set_title("Bird's-eye view", fontsize=9)
+    ax_bev.set_title(
+        f"Bird's-eye view ({len(unique_cluster_ids)} clusters)" if has_clusters else "Bird's-eye view",
+        fontsize=9,
+    )
     ax_bev.set_aspect("equal")
     ax_bev.grid(True, alpha=0.3)
 
@@ -771,8 +848,7 @@ def _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img,
         v = pc.velocity
         ax_vel.scatter(azimuth_deg[static], v[static],
                        s=0.4, c="#999999", alpha=0.5, rasterized=True)
-        ax_vel.scatter(azimuth_deg[is_moving], v[is_moving],
-                       s=3, c="#e63333", alpha=0.7, rasterized=True)
+        _scatter_moving(ax_vel, azimuth_deg, v)
         if ego_params is not None:
             a_sweep = np.linspace(lim["az"][0], lim["az"][1], 500)
             vr = -ego_params[0] * np.cos(np.radians(a_sweep)) \
@@ -796,8 +872,7 @@ def _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img,
     # ── Bottom-right: BEV zoom
     ax_zoom.scatter(x[static], y[static],
                     s=0.5, c="#999999", alpha=0.4, rasterized=True)
-    ax_zoom.scatter(x[is_moving], y[is_moving],
-                    s=4, c="#e63333", alpha=0.7, rasterized=True)
+    _scatter_moving(ax_zoom, x, y)
     ax_zoom.set_xlim(lim["x_zoom"])
     ax_zoom.set_ylim(lim["y_zoom"])
     ax_zoom.set_xlabel("x, m")
@@ -808,9 +883,11 @@ def _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img,
 
     n_mov = int(is_moving.sum())
     n_tot = len(is_moving)
+    n_clu = len(unique_cluster_ids) if has_clusters else 0
     fig.suptitle(
         f"Frame {frame_idx + 1}/{n_frames}  |  "
-        f"moving {n_mov}/{n_tot} ({100 * n_mov / n_tot:.1f}%)",
+        f"moving {n_mov}/{n_tot} ({100 * n_mov / n_tot:.1f}%)"
+        + (f"  |  {n_clu} clusters" if n_clu else ""),
         fontsize=12, y=0.98,
     )
 
@@ -837,7 +914,7 @@ def render_mos_sequence(
         dpi               : DPI сохраняемых изображений
     """
     import matplotlib.image as mpimg
-    from src.motion_segmentation import ransac_ego_motion
+    from src.motion_segmentation import ransac_ego_motion, cluster_moving_objects
 
     _os.makedirs(output_dir, exist_ok=True)
 
@@ -868,6 +945,9 @@ def render_mos_sequence(
         if pc.velocity is not None:
             ego_params, _ = ransac_ego_motion(pc, inlier_threshold=inlier_threshold)
 
+        # DBSCAN кластеризация движущихся точек
+        cluster_ids = cluster_moving_objects(pc, is_moving)
+
         camera_img = None
         if cam_index:
             stem = _os.path.splitext(_os.path.basename(bin_path))[0]
@@ -876,11 +956,13 @@ def render_mos_sequence(
                 if img_path:
                     camera_img = mpimg.imread(img_path)
 
-        _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img, i, n, lim)
+        _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img, i, n, lim,
+                        cluster_ids=cluster_ids)
 
         out_path = _os.path.join(output_dir, f"{i:06d}.png")
         fig.savefig(out_path, dpi=dpi)
-        print(f"\r[{i + 1}/{n}] saved {out_path}", end="", flush=True)
+        n_clu = int(np.unique(cluster_ids[cluster_ids >= 0]).size)
+        print(f"\r[{i + 1}/{n}] {n_clu} clusters | saved {out_path}", end="", flush=True)
 
     plt.close(fig)
     print(f"\n\nГотово! {n} кадров сохранено в {output_dir}/")

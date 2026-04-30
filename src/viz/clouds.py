@@ -1,6 +1,6 @@
 import open3d as o3d
 import numpy as np
-from typing import List, Optional
+from typing import Optional
 from src.core.pointcloud import PointCloud
 
 
@@ -51,62 +51,49 @@ _NOISE_COLOR   = np.array([1.00, 0.30, 0.30], dtype=np.float32)   # dim red
 
 
 def visualize_mos(
-    pcs: List[PointCloud],
-    is_moving_list: List[np.ndarray],
-    cluster_ids_list: Optional[List[np.ndarray]] = None,
+    pc: PointCloud,
+    is_moving: np.ndarray,
+    cluster_ids: Optional[np.ndarray] = None,
     window_name: str = "Motion Object Segmentation",
 ) -> None:
     """
-    Visualise moving / static classification for one or more frames.
+    Визуализация moving / static классификации для одного кадра.
 
-    Colour scheme:
-    Static points       -> grey
-    Moving noise  (-1)  -> dim red  (only when cluster_ids supplied)
-    Moving clusters     -> distinct colours per object
-    Moving (no cluster) -> bright red
+    Цветовая схема:
+    Static точки          -> серый
+    Moving шум    (-1)    -> красный
+    Moving кластеры       -> на каждый объект свой цвет
+    Moving (без кластера) -> ярко красный
 
     Parameters:
-        pcs              : list of PointCloud objects (one or more frames)
-        is_moving_list   : list of bool arrays, True = moving (one per frame)
-        cluster_ids_list : optional list of int32 arrays from cluster_moving_objects(). 
-                        Values:
-                        -2 -> static, -1 -> noise, ≥0 -> cluster
-        window_name      : Open3D window title
+        pc          : облако точек
+        is_moving   : bool массив, True = moving
+        cluster_ids : опциональный массив из cluster_moving_objects().
+                      Values: -2 -> static, -1 -> шум, ≥0 -> кластер
+        window_name : заголовок окна Open3D
     """
-    geometries = []
-    frame_gap = 0.0   # will be set from first frame bounding box
+    n = len(pc.xyz)
+    colors = np.tile(_STATIC_COLOR, (n, 1))
 
-    for fi, (pc, is_moving) in enumerate(zip(pcs, is_moving_list)):
-        n = len(pc.xyz)
-        colors = np.tile(_STATIC_COLOR, (n, 1))
+    if cluster_ids is not None:
+        moving_noise = (cluster_ids == -1)
+        colors[moving_noise] = _NOISE_COLOR
 
-        if cluster_ids_list is not None:
-            cids = cluster_ids_list[fi]
-            moving_noise = (cids == -1)
-            colors[moving_noise] = _NOISE_COLOR
+        unique_clusters = np.unique(cluster_ids[cluster_ids >= 0])
+        for cid in unique_clusters:
+            mask = cluster_ids == cid
+            c = _CLUSTER_PALETTE[int(cid) % len(_CLUSTER_PALETTE)]
+            colors[mask] = c
+    else:
+        # No cluster info: moving -> red, static -> grey
+        colors[is_moving] = [1.0, 0.15, 0.15]
 
-            unique_clusters = np.unique(cids[cids >= 0])
-            for cid in unique_clusters:
-                mask = cids == cid
-                c = _CLUSTER_PALETTE[int(cid) % len(_CLUSTER_PALETTE)]
-                colors[mask] = c
-        else:
-            # No cluster info: moving → red, static → grey
-            colors[is_moving] = [1.0, 0.15, 0.15]
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pc.xyz)
+    pcd.colors = o3d.utility.Vector3dVector(colors)
 
-        pcd = o3d.geometry.PointCloud()
-        # Offset successive frames along Y so they don't overlap
-        if fi == 0:
-            y_range = float(pc.xyz[:, 1].max() - pc.xyz[:, 1].min())
-            frame_gap = y_range * 1.2 if y_range > 0 else 60.0
-        shifted_xyz = pc.xyz.copy()
-        shifted_xyz[:, 1] += fi * frame_gap
-        pcd.points = o3d.utility.Vector3dVector(shifted_xyz)
-        pcd.colors = o3d.utility.Vector3dVector(colors)
-        geometries.append(pcd)
-
-    legend_lines = _build_legend_lines(has_clusters=cluster_ids_list is not None)
-    geometries.extend(legend_lines)
+    geometries = [pcd]
+    geometries.extend(_build_legend_lines(has_clusters=cluster_ids is not None))
 
     o3d.visualization.draw_geometries(
         geometries,
@@ -117,7 +104,7 @@ def visualize_mos(
 
 
 def _build_legend_lines(has_clusters: bool) -> list:
-    """Return a list of Open3D LineSet objects used as a colour legend."""
+    """Возвращает список Open3D LineSet объектов использующиеся как цветовая легенда."""
     entries = [
         ("Static",  _STATIC_COLOR),
         ("Moving",  np.array([1.0, 0.15, 0.15], dtype=np.float32)),

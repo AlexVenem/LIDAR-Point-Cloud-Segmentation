@@ -15,7 +15,7 @@ def read_kitti_bin(path: str) -> PointCloud:
     return PointCloud(
     xyz=data[:, :3],
     intensity=data[:, 3],
-    velocity=None,
+    velocity=None, # в HeliMOS нет радиальных скоростей
     )
 
 

@@ -2,6 +2,8 @@ import sys
 import os
 import argparse
 
+import numpy as np
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.config import GPS_MAP_FILE
@@ -32,18 +34,18 @@ def _find_closest_camera_image(camera_dir: str, lidar_ts: int):
 def main() -> None:
     parser = argparse.ArgumentParser(description="LiDAR processing CLI")
     parser.add_argument("--dataset", choices=["helimos", "helipr", "hercules"],
-        required=True)
-    parser.add_argument("--bin", type=str, required=False)
+        required=True) # возможно, указания конкретного датасета не нужно или просто необязательно
+    parser.add_argument("--bin", type=str, required=False) # возможно, стоит переименовать на lidar_bin или убрать --radar опцию
     parser.add_argument("--ins", type=str, required=False, help="Путь к INS CSV файлу")
     parser.add_argument("--imu", type=str, required=False, help="Путь к IMU CSV файлу")
     parser.add_argument("--gps", type=str, required=False, help="Путь к GPS CSV файлу")
-    parser.add_argument("--radar", type=str, required=False, help="Путь к Radar BIN файлу")
+    parser.add_argument("--radar", type=str, required=False, help="Путь к Radar BIN файлу") # возможно переименовать на radar_bin или убрать вообще
     parser.add_argument("--action",
                         choices=["cloud", "velocity", "ego-velocity", "map", "track", "accel",
                                  "mos", "mos-train", "mos-sequence"],
-                        required=True)
+                        required=True) # наверное, mos-sequence можно убрать. И вообще все, что касается mos на последовательности кадров
     parser.add_argument("--output", type=str, required=False, default=GPS_MAP_FILE,
-                        help=f"Путь для сохранения HTML карты GPS (по умолчанию: {GPS_MAP_FILE})")
+                        help=f"Путь для сохранения HTML карты GPS (по умолчанию: {GPS_MAP_FILE})") # возможно, стоит написать output_map
 
     # MOS-specific arguments
     parser.add_argument("--model", type=str, required=False, default="models/mos_rf.pkl",
@@ -53,50 +55,61 @@ def main() -> None:
                         help="Тип сенсора для HeLiMOS (по умолчанию: Velodyne)")
     parser.add_argument("--split", type=str, required=False, default="train",
                         choices=["train", "val", "test"],
-                        help="Раздел датасета для обучения (по умолчанию: train)")
+                        help="Раздел датасета для обучения (по умолчанию: train)") # fix: убрать "для обучения" в help
     parser.add_argument("--max-frames", type=int, required=False, default=None,
                         help="Максимальное число кадров для обучения/инференса")
     parser.add_argument("--n-frames", type=int, required=False, default=5,
-                        help="Число кадров для mos-sequence (по умолчанию: 5)")
+                        help="Число кадров для mos-sequence (по умолчанию: 5)") # возможно, вообще убрать
     parser.add_argument("--sequence", type=str, required=False,
-                        help="Путь к корню датасета Deskewed_LiDAR для mos-sequence")
+                        help="Путь к корню датасета Deskewed_LiDAR для mos-sequence") # возможно, вообще убрать
     parser.add_argument("--n-context", type=int, required=False, default=3,
-                        help="Размер временного окна для temporal MOS (по умолчанию: 3)")
+                        help="Размер временного окна для temporal MOS (по умолчанию: 3)") # возможно, вообще убрать
     parser.add_argument("--threshold", type=float, required=False, default=0.85,
                         help="Порог P(moving) для RF классификатора (по умолчанию: 0.85)")
     parser.add_argument("--inlier-threshold", type=float, required=False, default=0.5,
                         help="RANSAC inlier threshold [m/s] для Doppler MOS (по умолчанию: 0.5)")
     parser.add_argument("--camera", type=str, required=False,
-                        help="Папка со снимками стерео-камеры (stereo_left). "
+                        help="Папка со снимками стерео-камеры. "
                              "Ближайший по временной метке кадр добавляется к MOS-графику.")
     parser.add_argument("--gpu", action="store_true",
-                        help="Использовать GPU (XGBoost CUDA) вместо CPU (Random Forest) для обучения MOS")
+                        help="Использовать GPU (XGBoost CUDA) вместо CPU (Random Forest) для обучения MOS") # хз, надо ли
     parser.add_argument("--aeva", type=str, required=False,
-                        help="Папка с .bin кадрами Aeva для mos-sequence (например 03_Day/Aeva)")
+                        help="Папка с .bin кадрами Aeva для mos-sequence (например 03_Day/Aeva)") # думаю, лишнее
     parser.add_argument("--dpi", type=int, required=False, default=120,
                         help="DPI сохраняемых PNG для mos-sequence (по умолчанию: 120)")
     parser.add_argument("--start", type=int, required=False, default=0,
-                        help="Начальный индекс кадра для mos-sequence (по умолчанию: 0)")
+                        help="Начальный индекс кадра для mos-sequence (по умолчанию: 0)") # возможно, вообще убрать
+    parser.add_argument("--3d", dest="show_3d", action="store_true",
+                        help="Показать 3D-визуализацию через Open3D (для action=mos)") # не уверен, что надо
+    parser.add_argument("--eps-xyz", type=float, default=1.0,
+                        help="DBSCAN: пространственный радиус, м (по умолчанию: 1.0)")
+    parser.add_argument("--eps-vr", type=float, default=1.0,
+                        help="DBSCAN: радиус по радиальной скорости, м/с (по умолчанию: 1.0)")
+    parser.add_argument("--min-samples", type=int, default=8,
+                        help="DBSCAN: минимум точек в кластере (по умолчанию: 8)")
+    parser.add_argument("--single-stage", action="store_true",
+                        help="Один проход 4D DBSCAN вместо двухэтапного Vr→xyz")
 
     args = parser.parse_args()
 
-    # Motion Object Segmentation
+    # Обучение модели Motion Object Segmentation и ее сохранение на диск
     if args.action == "mos-train":
         from src.motion_segmentation import MotionSegmenter
 
-        data_root = args.sequence or "data/Deskewed_LiDAR"
-        seg = MotionSegmenter(threshold=args.threshold, inlier_threshold=args.inlier_threshold, use_gpu=args.gpu)
+        data_root = args.sequence or "data/Deskewed_LiDAR" # путь к данным
+        seg = MotionSegmenter(threshold=args.threshold, 
+                              inlier_threshold=args.inlier_threshold, use_gpu=args.gpu) # думаю, не надо подавать inlier_threshold
         seg.train_on_helimos(
             data_root=data_root,
             sensor=args.sensor,
-            split=args.split,
+            split=args.split, # возможно, split аргумент не нужен
             max_frames=args.max_frames,
         )
         seg.save(args.model)
         return
 
     if args.action == "mos":
-        from src.motion_segmentation import MotionSegmenter, ransac_ego_motion
+        from src.motion_segmentation import MotionSegmenter, cluster_moving_objects
         from src.viz.plots import plot_mos
 
         # Загрузка кадра через loader, соответствующий --dataset
@@ -128,7 +141,7 @@ def main() -> None:
         seg = MotionSegmenter(threshold=args.threshold, inlier_threshold=args.inlier_threshold, use_gpu=args.gpu)
 
         # Модель нужна только для сенсоров без Doppler-скорости.
-        # Для Aeva/Radar (velocity != None) используется RANSAC — модель не требуется.
+        # Для Aeva/Radar (velocity != None) используется RANSAC - модель не требуется.
         if pc.velocity is None:
             if not os.path.exists(args.model):
                 print(f"Ошибка: модель не найдена ({args.model}). "
@@ -136,23 +149,39 @@ def main() -> None:
                 return
             seg.load(args.model)
         else:
-            print("[MOS] Doppler velocity detected → using RANSAC (model not needed)")
+            print("[MOS] Doppler velocity detected -> using RANSAC (model not needed)")
 
-        [is_moving] = seg.segment_frames([pc])
-
-        # RANSAC кривая собственной скорости (если скорость есть)
-        ego_params = None
-        if pc.velocity is not None:
-            ego_params, _ = ransac_ego_motion(pc, inlier_threshold=args.inlier_threshold)
+        is_moving, ego_params = seg.segment_frame(pc)
 
         n_moving = int(is_moving.sum())
         n_total = len(is_moving)
         print(f"Moving: {n_moving}/{n_total} points ({100*n_moving/n_total:.1f}%)")
 
+        # DBSCAN кластеризация движущихся точек (4D: xyz + Vr)
+        cluster_ids = cluster_moving_objects(
+            pc, is_moving,
+            eps_xyz=args.eps_xyz,
+            eps_vr=args.eps_vr,
+            min_samples=args.min_samples,
+            two_stage=not args.single_stage,
+        )
+        unique_cluster_ids = np.unique(cluster_ids[cluster_ids >= 0])
+        if len(unique_cluster_ids) > 0:
+            print(f"[DBSCAN] {len(unique_cluster_ids)} clusters detected:")
+            for cid in unique_cluster_ids:
+                cmask = cluster_ids == cid
+                n_pts = int(cmask.sum())
+                vr_str = ""
+                if pc.velocity is not None:
+                    vr_str = f", Vr={float(pc.velocity[cmask].mean()):.2f} m/s"
+                print(f"  #{int(cid)}: {n_pts} pts{vr_str}")
+        else:
+            print("[DBSCAN] No clusters found among moving points")
+
         camera_img = None
         if args.camera:
             import matplotlib.image as mpimg
-            bin_stem = os.path.splitext(os.path.basename(args.bin))[0]
+            bin_stem = os.path.splitext(os.path.basename(args.bin))[0] # извлекаем time_stamp из названия bin файла
             if bin_stem.isdigit():
                 lidar_ts = int(bin_stem)
                 img_path = _find_closest_camera_image(args.camera, lidar_ts)
@@ -164,14 +193,24 @@ def main() -> None:
             else:
                 print("Предупреждение: имя .bin-файла не является временной меткой — камера проигнорирована.")
 
-        plot_mos(pc, is_moving, ego_params=ego_params, camera_img=camera_img)
+        if args.show_3d:
+            from src.viz.clouds import visualize_mos
+            visualize_mos(
+                pc=pc,
+                is_moving=is_moving,
+                cluster_ids=cluster_ids,
+                window_name="MOS + DBSCAN 3D",
+            )
+        else:
+            plot_mos(pc, is_moving, ego_params=ego_params, camera_img=camera_img,
+                     cluster_ids=cluster_ids)
         return
 
     if args.action == "mos-sequence":
         import glob as _glob
         from src.motion_segmentation import MotionSegmenter
 
-        # ── Hercules / Aeva: покадровый рендеринг в PNG ──────────────────
+        # Hercules / Aeva: покадровый рендеринг в PNG
         if args.dataset == "hercules" and args.aeva:
             from src.datasets.hercules import load_hercules_aeva
             from src.viz.plots import render_mos_sequence
@@ -204,7 +243,7 @@ def main() -> None:
             )
             return
 
-        # ── HeLiMOS: temporal sequence segmentation ──────────────────────
+        # HeLiMOS: temporal sequence segmentation
         from src.motion_segmentation import cluster_moving_objects
         from src.datasets.helimos import load_helimos_sequence
 
@@ -230,14 +269,14 @@ def main() -> None:
             print("[MOS] No poses available — using per-frame segmentation")
             is_moving_list = seg.segment_frames(frames)
 
-        cluster_ids_list = [
-            cluster_moving_objects(pc, im) for pc, im in zip(frames, is_moving_list)
-        ]
-
         total_moving = sum(int(m.sum()) for m in is_moving_list)
         total_pts = sum(len(m) for m in is_moving_list)
+        total_clusters = sum(
+            int(np.unique(c[c >= 0]).size)
+            for c in (cluster_moving_objects(pc, im) for pc, im in zip(frames, is_moving_list))
+        )
         print(f"Frames: {len(frames)} | Moving: {total_moving}/{total_pts} "
-              f"({100*total_moving/total_pts:.1f}%)")
+              f"({100*total_moving/total_pts:.1f}%) | Clusters: {total_clusters}")
         return
 
     # Стандартные действия по датасетам
