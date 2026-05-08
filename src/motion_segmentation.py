@@ -1,5 +1,6 @@
 import os
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Iterator, List, Optional, Tuple
 
 import joblib
@@ -272,6 +273,57 @@ def _two_stage_dbscan(
             next_cluster += 1
 
     return labels
+
+
+# Oriented bounding box for detected clusters
+@dataclass
+class OBB:
+    """Ориентированный 3D bounding box для одного кластера."""
+    center: np.ndarray # центр в системе координат сенсора
+    extent: np.ndarray # длины сторон вдоль главных осей
+    R: np.ndarray      # поворот: главные оси -> мир
+    cluster_id: int
+    n_points: int
+
+    def corners(self) -> np.ndarray:
+        """8 вершин бокса в мировых координатах, форма (8, 3)."""
+        ax, ay, az = self.extent / 2.0
+        local = np.array([
+            [-ax, -ay, -az], [ ax, -ay, -az], [ ax,  ay, -az], [-ax,  ay, -az],
+            [-ax, -ay,  az], [ ax, -ay,  az], [ ax,  ay,  az], [-ax,  ay,  az],
+        ], dtype=np.float64)
+        return (self.R @ local.T).T + self.center
+
+
+def compute_cluster_obbs(pc: PointCloud, cluster_ids: np.ndarray) -> List[OBB]:
+    """
+    Для каждого DBSCAN-кластера (id >= 0) построить ориентированный bounding box
+    через PCA Open3D. Кластеры, для которых OBB не строится (вырожденная геометрия),
+    пропускаются.
+    """
+    import open3d as o3d
+
+    obbs: List[OBB] = []
+    for cid in np.unique(cluster_ids[cluster_ids >= 0]):
+        mask = cluster_ids == cid
+        pts = pc.xyz[mask].astype(np.float64)
+
+        try:
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(pts)
+            obb = pcd.get_oriented_bounding_box()
+        except RuntimeError:
+            # Open3D кидает RuntimeError если точки коллинеарны/копланарны
+            continue
+
+        obbs.append(OBB(
+            center=np.asarray(obb.center, dtype=np.float64),
+            extent=np.asarray(obb.extent, dtype=np.float64),
+            R=np.asarray(obb.R, dtype=np.float64),
+            cluster_id=int(cid),
+            n_points=int(mask.sum()),
+        ))
+    return obbs
 
 
 # MotionSegmenter – main class

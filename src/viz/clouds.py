@@ -54,6 +54,7 @@ def visualize_mos(
     pc: PointCloud,
     is_moving: np.ndarray,
     cluster_ids: Optional[np.ndarray] = None,
+    obbs: Optional[list] = None,
     window_name: str = "Motion Object Segmentation",
 ) -> None:
     """
@@ -70,6 +71,8 @@ def visualize_mos(
         is_moving   : bool массив, True = moving
         cluster_ids : опциональный массив из cluster_moving_objects().
                       Values: -2 -> static, -1 -> шум, ≥0 -> кластер
+        obbs        : опциональный список OBB из compute_cluster_obbs() — каждый
+                      рисуется проволочной рамкой в цвет своего кластера
         window_name : заголовок окна Open3D
     """
     n = len(pc.xyz)
@@ -93,14 +96,30 @@ def visualize_mos(
     pcd.colors = o3d.utility.Vector3dVector(colors)
 
     geometries = [pcd]
+
+    if obbs:
+        for obb in obbs:
+            o3d_obb = o3d.geometry.OrientedBoundingBox(
+                obb.center, obb.R, obb.extent,
+            )
+            o3d_obb.color = _CLUSTER_PALETTE[obb.cluster_id % len(_CLUSTER_PALETTE)].tolist()
+            geometries.append(o3d_obb)
+
     geometries.extend(_build_legend_lines(has_clusters=cluster_ids is not None))
 
-    o3d.visualization.draw_geometries(
-        geometries,
-        window_name=window_name,
-        width=1280,
-        height=720,
-    )
+    # Используем Visualizer напрямую (а не draw_geometries), чтобы поднять
+    # размер точки и затемнить фон
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name=window_name, width=1280, height=720)
+    for g in geometries:
+        vis.add_geometry(g)
+
+    opt = vis.get_render_option()
+    opt.point_size = 3.0
+    opt.background_color = np.array([0.05, 0.05, 0.05])
+
+    vis.run()
+    vis.destroy_window()
 
 
 def _build_legend_lines(has_clusters: bool) -> list:

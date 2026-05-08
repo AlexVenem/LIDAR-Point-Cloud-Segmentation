@@ -111,7 +111,7 @@ def main() -> None:
         return
 
     if args.action == "mos":
-        from src.motion_segmentation import MotionSegmenter, cluster_moving_objects
+        from src.motion_segmentation import MotionSegmenter, cluster_moving_objects, compute_cluster_obbs
         from src.viz.plots import plot_mos
 
         # Загрузка кадра через loader, соответствующий --dataset
@@ -168,15 +168,22 @@ def main() -> None:
             two_stage=not args.single_stage,
         )
         unique_cluster_ids = np.unique(cluster_ids[cluster_ids >= 0])
+        obbs = compute_cluster_obbs(pc, cluster_ids) if len(unique_cluster_ids) > 0 else []
+        obb_by_cid = {o.cluster_id: o for o in obbs}
         if len(unique_cluster_ids) > 0:
-            print(f"[DBSCAN] {len(unique_cluster_ids)} clusters detected:")
+            print(f"[DBSCAN] {len(unique_cluster_ids)} clusters detected ({len(obbs)} with OBB):")
             for cid in unique_cluster_ids:
                 cmask = cluster_ids == cid
                 n_pts = int(cmask.sum())
                 vr_str = ""
                 if pc.velocity is not None:
                     vr_str = f", Vr={float(pc.velocity[cmask].mean()):.2f} m/s"
-                print(f"  #{int(cid)}: {n_pts} pts{vr_str}")
+                obb = obb_by_cid.get(int(cid))
+                size_str = (
+                    f", size=({obb.extent[0]:.1f}x{obb.extent[1]:.1f}x{obb.extent[2]:.1f})"
+                    if obb is not None else ", OBB=skipped"
+                )
+                print(f"  #{int(cid)}: {n_pts} pts{size_str}{vr_str}")
         else:
             print("[DBSCAN] No clusters found among moving points")
 
@@ -201,11 +208,12 @@ def main() -> None:
                 pc=pc,
                 is_moving=is_moving,
                 cluster_ids=cluster_ids,
+                obbs=obbs,
                 window_name="MOS + DBSCAN 3D",
             )
         else:
             plot_mos(pc, is_moving, ego_params=ego_params, camera_img=camera_img,
-                     cluster_ids=cluster_ids)
+                     cluster_ids=cluster_ids, obbs=obbs)
         return
 
     if args.action == "mos-sequence":

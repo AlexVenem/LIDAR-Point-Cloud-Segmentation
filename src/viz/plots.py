@@ -505,6 +505,33 @@ def _get_cluster_colors(n: int):
     return [cmap(i) for i in range(n)]
 
 
+def _draw_obb_bev(ax, obb, color):
+    """Спроецировать OBB на плоскость X-Y и нарисовать как полигон с подписью."""
+    from matplotlib.patches import Polygon
+    from scipy.spatial import ConvexHull
+
+    corners_xy = obb.corners()[:, :2]  # (8, 2)
+    try:
+        hull = ConvexHull(corners_xy)
+        poly_pts = corners_xy[hull.vertices]
+    except Exception:
+        # Вырожденная проекция (точки коллинеарны) — fallback на AABB
+        mn, mx = corners_xy.min(0), corners_xy.max(0)
+        poly_pts = np.array([
+            [mn[0], mn[1]], [mx[0], mn[1]], [mx[0], mx[1]], [mn[0], mx[1]],
+        ])
+
+    ax.add_patch(Polygon(poly_pts, closed=True, fill=False,
+                         edgecolor=color, linewidth=1.8))
+    ax.text(
+        obb.center[0], poly_pts[:, 1].max() + 0.3,
+        f"#{obb.cluster_id}",
+        fontsize=7, color=color, ha="center", va="bottom",
+        fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.15", facecolor="white", alpha=0.7, edgecolor="none"),
+    )
+
+
 def plot_mos(
     pc: PointCloud,
     is_moving: np.ndarray,
@@ -512,6 +539,7 @@ def plot_mos(
     title: str = "",
     camera_img: "np.ndarray | None" = None,
     cluster_ids: "np.ndarray | None" = None,
+    obbs: "list | None" = None,
 ) -> None:
     """
     2D-графики MOS-результата (static vs moving) с опциональным кадром камеры.
@@ -530,7 +558,8 @@ def plot_mos(
         ego_params  : [Vx, Vy] для отрисовки RANSAC-кривой (опционально)
         title       : заголовок окна
         camera_img  : RGB-массив (H, W, 3) с кадром камеры (опционально)
-        cluster_ids : int32 array (N,), ≥0 = cluster id, -1 = noise, -2 = static
+        cluster_ids : int32 array (N,), >=0 = cluster id, -1 = noise, -2 = static
+        obbs        : список OBB из compute_cluster_obbs() — проекции на BEV
     """
     x, y, z = pc.xyz[:, 0], pc.xyz[:, 1], pc.xyz[:, 2]
     azimuth_deg = np.degrees(np.arctan2(y, x))
@@ -637,6 +666,9 @@ def plot_mos(
                 x[cmask], y[cmask],
                 s=4, color=c, alpha=0.8, rasterized=True,
             )
+        if obbs:
+            for obb in obbs:
+                _draw_obb_bev(ax_bev, obb, cid_to_color.get(obb.cluster_id, "black"))
     else:
         ax_bev.scatter(
             x[is_moving], y[is_moving],
