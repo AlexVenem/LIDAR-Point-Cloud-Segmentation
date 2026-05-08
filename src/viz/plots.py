@@ -125,14 +125,15 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
 
     azimuth_raw = ins_raw["azimuth"].values
 
-    # Вычисление скоростей
-    Vx_gps, Vy_gps, ts_gps = GPS_to_V(gps_raw[["timestamp", "lat", "lon", "height"]].copy())
-    speed_gps = np.sqrt(Vx_gps**2 + Vy_gps**2)
+    # Вычисление скоростей. Модуль = sqrt(Vx²+Vy²+Vz²): нельзя отбрасывать Vz,
+    # ECEF-оси наклонены относительно локальной горизонтали.
+    Vx_gps, Vy_gps, Vz_gps, ts_gps = GPS_to_V(gps_raw[["timestamp", "lat", "lon", "height"]].copy())
+    speed_gps = np.sqrt(Vx_gps**2 + Vy_gps**2 + Vz_gps**2)
 
-    Vx_ins, Vy_ins, ts_ins = INS_to_V(ins_raw[["timestamp", "latitude", "longitude",
-                                                 "north_velocity", "east_velocity",
-                                                 "up_velocity"]].copy())
-    speed_ins = np.sqrt(Vx_ins**2 + Vy_ins**2)
+    Vx_ins, Vy_ins, Vz_ins, ts_ins = INS_to_V(ins_raw[["timestamp", "latitude", "longitude",
+                                                         "north_velocity", "east_velocity",
+                                                         "up_velocity"]].copy())
+    speed_ins = np.sqrt(Vx_ins**2 + Vy_ins**2 + Vz_ins**2)
 
     # Угловая скорость рыскания из азимута INSPVA
     az_unwrap = np.unwrap(np.radians(azimuth_raw)) * 180.0 / np.pi
@@ -668,27 +669,28 @@ def plot_mos(
     plt.tight_layout()
     plt.show()
 
-# ── Velocity from GPS / INS ─────────────────────────────────────────────────
- 
-def plot_ego_velocity(Vx: np.ndarray, Vy: np.ndarray, ts: np.ndarray,
-                      source: str = "GPS") -> None:
+# Velocity from GPS / INS
+def plot_ego_velocity(Vx: np.ndarray, Vy: np.ndarray, Vz: np.ndarray,
+                      ts: np.ndarray, source: str = "GPS") -> None:
     """
-    График компонент эго-скорости (Vx, Vy) и абсолютной скорости от времени.
- 
+    График компонент эго-скорости (Vx, Vy, Vz) и абсолютной скорости от времени.
+
     Parameters:
         Vx     : np.ndarray — скорость по оси X (ECEF), м/с
         Vy     : np.ndarray — скорость по оси Y (ECEF), м/с
+        Vz     : np.ndarray — скорость по оси Z (ECEF), м/с
         ts     : np.ndarray — временные метки (секунды)
         source : str — источник данных ('GPS' или 'INS')
     """
-    V = np.sqrt(Vx**2 + Vy**2)
+    V = np.sqrt(Vx**2 + Vy**2 + Vz**2)
     t_rel = ts - ts[0]  # относительное время от начала
- 
+
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
     fig.suptitle(f"Ego-velocity from {source}", fontsize=13)
- 
+
     ax1.plot(t_rel, Vx, label="Vx", linewidth=0.8)
     ax1.plot(t_rel, Vy, label="Vy", linewidth=0.8)
+    ax1.plot(t_rel, Vz, label="Vz", linewidth=0.8)
     ax1.set_ylabel("Velocity [m/s]")
     ax1.set_title("ECEF velocity components")
     ax1.legend()

@@ -64,6 +64,8 @@ def main() -> None:
                         help="Путь к корню датасета Deskewed_LiDAR для mos-sequence") # возможно, вообще убрать
     parser.add_argument("--n-context", type=int, required=False, default=3,
                         help="Размер временного окна для temporal MOS (по умолчанию: 3)") # возможно, вообще убрать
+    parser.add_argument("--disable-temporal", action="store_true",
+                        help="Отключить temporal consistency (pose-based) для mos-sequence; по умолчанию: включено при наличии поз")
     parser.add_argument("--threshold", type=float, required=False, default=0.85,
                         help="Порог P(moving) для RF классификатора (по умолчанию: 0.85)")
     parser.add_argument("--inlier-threshold", type=float, required=False, default=0.5,
@@ -262,11 +264,14 @@ def main() -> None:
             print("Ошибка: кадры не найдены. Проверьте --sequence и --sensor.")
             return
 
-        if poses is not None and len(poses) == len(frames):
+        if not args.disable_temporal and poses is not None and len(poses) == len(frames):
             print(f"[MOS] Using temporal consistency (n_context={args.n_context})")
             is_moving_list = seg.segment_sequence(frames, poses, n_context=args.n_context)
         else:
-            print("[MOS] No poses available — using per-frame segmentation")
+            if args.disable_temporal:
+                print("[MOS] Temporal consistency disabled by flag: using per-frame segmentation")
+            else:
+                print("[MOS] No poses available - using per-frame segmentation")
             is_moving_list = seg.segment_frames(frames)
 
         total_moving = sum(int(m.sum()) for m in is_moving_list)
@@ -333,8 +338,8 @@ def main() -> None:
                 from src.viz.plots import plot_ego_velocity
                 gps_df = read_GPS(args.gps)
                 if gps_df is not None:
-                    Vx, Vy, ts = GPS_to_V(gps_df)
-                    plot_ego_velocity(Vx, Vy, ts, source="GPS")
+                    Vx, Vy, Vz, ts = GPS_to_V(gps_df)
+                    plot_ego_velocity(Vx, Vy, Vz, ts, source="GPS")
             else:
                 print("Ошибка: для --gps поддерживаются action='map' и action='ego-velocity'")
 
@@ -350,8 +355,8 @@ def main() -> None:
                 from src.odometry import INS_to_V
                 from src.viz.plots import plot_ego_velocity
                 ins_df = load_ins(args.ins)
-                Vx, Vy, ts = INS_to_V(ins_df)
-                plot_ego_velocity(Vx, Vy, ts, source="INS")
+                Vx, Vy, Vz, ts = INS_to_V(ins_df)
+                plot_ego_velocity(Vx, Vy, Vz, ts, source="INS")
             else:
                 print("Ошибка: для --ins поддерживаются action='track' и action='ego-velocity'")
 
