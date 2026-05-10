@@ -68,8 +68,8 @@ def main() -> None:
                         help="Отключить temporal consistency (pose-based) для mos-sequence; по умолчанию: включено при наличии поз")
     parser.add_argument("--threshold", type=float, required=False, default=0.85,
                         help="Порог P(moving) для RF классификатора (по умолчанию: 0.85)")
-    parser.add_argument("--inlier-threshold", type=float, required=False, default=0.5,
-                        help="RANSAC inlier threshold [m/s] для Doppler MOS (по умолчанию: 0.5)")
+    parser.add_argument("--inlier-threshold", type=float, required=False, default=0.3,
+                        help="RANSAC inlier threshold [m/s] для Doppler MOS (по умолчанию: 0.3)")
     parser.add_argument("--camera", type=str, required=False,
                         help="Папка со снимками стерео-камеры. "
                              "Ближайший по временной метке кадр добавляется к MOS-графику.")
@@ -85,8 +85,8 @@ def main() -> None:
                         help="Показать 3D-визуализацию через Open3D (для action=mos)") # не уверен, что надо
     parser.add_argument("--eps-xyz", type=float, default=1.0,
                         help="DBSCAN: пространственный радиус, м (по умолчанию: 1.0)")
-    parser.add_argument("--eps-vr", type=float, default=1.0,
-                        help="DBSCAN: радиус по радиальной скорости, м/с (по умолчанию: 1.0)")
+    parser.add_argument("--eps-vr", type=float, default=0.5,
+                        help="DBSCAN: радиус по радиальной скорости, м/с (по умолчанию: 0.5)")
     parser.add_argument("--min-samples", type=int, default=8,
                         help="DBSCAN: минимум точек в кластере (по умолчанию: 8)")
     parser.add_argument("--single-stage", action="store_true",

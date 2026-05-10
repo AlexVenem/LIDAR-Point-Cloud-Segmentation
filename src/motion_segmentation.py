@@ -303,8 +303,12 @@ def compute_cluster_obbs(pc: PointCloud, cluster_ids: np.ndarray) -> List[OBB]:
     """
     import open3d as o3d
 
+    MIN_CLUSTER_POINTS = 15
+
     obbs: List[OBB] = []
     for cid in np.unique(cluster_ids[cluster_ids >= 0]):
+        if int((cluster_ids == cid).sum()) < MIN_CLUSTER_POINTS:
+            continue
         mask = cluster_ids == cid
         pts = pc.xyz[mask].astype(np.float64)
 
