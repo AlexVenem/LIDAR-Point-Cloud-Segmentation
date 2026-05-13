@@ -5,11 +5,10 @@ import os
 
 def read_radar_bin(path: str) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """
-    Continental radar: record = 29 bytes:
-    <fffff (x,y,z,Vr,range) + <B (RCS) + <ff (az,el)
+    Читает bin файл радарных данных.
     Returns:
       xyz: (N,3)
-      extra: (N,5) columns [Vr, range, RCS, azimuth, elevation]
+      extra: (N,5) колонки [Vr, range, RCS, azimuth, elevation]
     """
     rec = 29
     pts = []

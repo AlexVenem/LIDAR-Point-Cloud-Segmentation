@@ -25,16 +25,15 @@ from scipy.ndimage import uniform_filter1d
 from src.config import GPS_DATA_FILE, INSPVA_DATA_FILE
 from src.odometry import GPS_to_V, INS_to_V
 
-# ── Загрузка и подготовка данных ───────────────────────────────────────────────
-
+# Загрузка и подготовка данных
 print("Загрузка GPS...")
 gps_raw = pd.read_csv(GPS_DATA_FILE, header=None,
                       names=["timestamp", "lat", "lon", "height",
                              "c4", "c5", "c6", "c7", "c8", "c9", "c10", "c11", "c12"])
 gps_raw = gps_raw.reset_index(drop=True)
 # GPS_to_V модифицирует timestamp in-place (нс → с)
-Vx_gps, Vy_gps, ts_gps = GPS_to_V(gps_raw[["timestamp", "lat", "lon", "height"]].copy())
-speed_gps = np.sqrt(Vx_gps**2 + Vy_gps**2)
+Vx_gps, Vy_gps, Vz_gps, ts_gps = GPS_to_V(gps_raw[["timestamp", "lat", "lon", "height"]].copy())
+speed_gps = np.sqrt(Vx_gps**2 + Vy_gps**2 + Vz_gps**2)
 
 print("Загрузка INS (INSPVA)...")
 ins_raw = pd.read_csv(INSPVA_DATA_FILE, header=None,
@@ -47,16 +46,16 @@ azimuth_raw = ins_raw["azimuth"].values
 ts_ns_raw   = ins_raw["timestamp"].values.astype(np.float64)
 
 # INS_to_V модифицирует timestamp in-place (нс → с)
-Vx_ins, Vy_ins, ts_ins = INS_to_V(ins_raw[["timestamp", "latitude", "longitude",
-                                             "north_velocity", "east_velocity",
-                                             "up_velocity"]].copy())
-speed_ins = np.sqrt(Vx_ins**2 + Vy_ins**2)
+Vx_ins, Vy_ins, Vz_ins, ts_ins = INS_to_V(ins_raw[["timestamp", "latitude", "longitude",
+                                                     "north_velocity", "east_velocity",
+                                                     "up_velocity"]].copy())
+speed_ins = np.sqrt(Vx_ins**2 + Vy_ins**2 + Vz_ins**2)
 
 # Направление: угловая скорость рыскания из азимута INSPVA
 az_unwrap = np.unwrap(np.radians(azimuth_raw)) * 180.0 / np.pi
 yaw_rate  = np.gradient(az_unwrap, ts_ins)
 
-# ── Приведение к единой временной оси (начало движения) ───────────────────────
+# Приведение к единой временной оси (начало движения)
 t0_ins = ts_ins[0]
 ts_ins_rel = ts_ins - t0_ins
 ts_gps_rel = ts_gps - t0_ins
@@ -78,8 +77,7 @@ ts_ins_plot  = ts_ins_rel[ins_mask] - t_start
 speed_ins_plot = uniform_filter1d(speed_ins[ins_mask], size=5)
 yaw_rate_plot  = yaw_rate[ins_mask]
 
-# ── Построение графиков ────────────────────────────────────────────────────────
-
+# Построение графиков
 fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
 fig.subplots_adjust(wspace=0.35, bottom=0.13)
 
@@ -105,7 +103,7 @@ ax2.axhline(0, color="gray", linewidth=0.8)
 ax2.grid(True, linestyle="--", alpha=0.5)
 ax2.set_title("в)", loc="left", fontsize=11, fontweight="bold")
 
-# ── Сохранение ─────────────────────────────────────────────────────────────────
+# Сохранение
 out_path = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "output", "velocity_direction_plot.png",
