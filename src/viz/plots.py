@@ -86,10 +86,107 @@ def plot_gps_on_map(gps_df, output_file='gps_map.html'):
     
     return map_gps
 
+def _resample_reference(ts_est: np.ndarray, v_est: np.ndarray,
+                        ts_ref: np.ndarray, v_ref: np.ndarray
+                        ) -> "tuple[np.ndarray, np.ndarray, np.ndarray] | None":
+    """
+    Интерполирует v_ref на ts_est. Возвращает (t, v_est_aligned, v_ref_at_t)
+    только для точек ts_est, попавших в диапазон ts_ref. None если пересечение пустое.
+    """
+    if len(ts_est) == 0 or len(ts_ref) < 2:
+        return None
+    order = np.argsort(ts_ref)
+    ts_ref_s, v_ref_s = ts_ref[order], v_ref[order]
+    mask = (ts_est >= ts_ref_s[0]) & (ts_est <= ts_ref_s[-1])
+    if mask.sum() < 2:
+        return None
+    t = ts_est[mask]
+    v_e = v_est[mask]
+    v_r = np.interp(t, ts_ref_s, v_ref_s)
+    return t, v_e, v_r
+
+
+def _classification_metrics(v_est: np.ndarray, v_ref: np.ndarray,
+                            threshold: float) -> dict:
+    """
+    Бинаризует обе скорости по порогу (>threshold = "движется") и считает
+    confusion matrix + accuracy/precision/recall/F1/specificity.
+    "Положительный" класс = движение.
+    """
+    y_pred = v_est > threshold
+    y_true = v_ref > threshold
+    tp = int(np.sum(y_pred & y_true))
+    fp = int(np.sum(y_pred & ~y_true))
+    fn = int(np.sum(~y_pred & y_true))
+    tn = int(np.sum(~y_pred & ~y_true))
+    n = tp + fp + fn + tn
+    acc = (tp + tn) / n if n else float("nan")
+    prec = tp / (tp + fp) if (tp + fp) else float("nan")
+    rec = tp / (tp + fn) if (tp + fn) else float("nan")
+    f1 = (2 * prec * rec / (prec + rec)
+          if prec == prec and rec == rec and (prec + rec) > 0 else float("nan"))
+    spec = tn / (tn + fp) if (tn + fp) else float("nan")
+    return dict(n=n, tp=tp, fp=fp, fn=fn, tn=tn,
+                accuracy=acc, precision=prec, recall=rec, f1=f1, specificity=spec)
+
+
+def _regression_metrics(v_est: np.ndarray, v_ref: np.ndarray) -> dict:
+    """Базовые регрессионные метрики ошибки скорости (м/с)."""
+    err = v_est - v_ref
+    abs_err = np.abs(err)
+    ss_res = float(np.sum(err ** 2))
+    ss_tot = float(np.sum((v_ref - v_ref.mean()) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    return dict(
+        mae=float(abs_err.mean()),
+        rmse=float(np.sqrt((err ** 2).mean())),
+        bias=float(err.mean()),
+        max_abs=float(abs_err.max()),
+        r2=r2,
+    )
+
+
+def _print_metrics_report(rows: "list[tuple[str, str, dict, dict]]",
+                          threshold: float) -> None:
+    """rows: [(estimator, reference, cls_metrics, reg_metrics), ...]"""
+    if not rows:
+        return
+    print()
+    print("=" * 96)
+    print(f"Метрики качества оценки эго-скорости  (порог движения = {threshold:.2f} м/с)")
+    print("=" * 96)
+    print("Классификация 'движется vs стоит' (положительный класс = движение)")
+    print("-" * 96)
+    print(f"{'estimator':<16}{'reference':<10}{'N':>5}  "
+          f"{'TP':>5}{'FP':>5}{'FN':>5}{'TN':>5}  "
+          f"{'Acc':>7}{'Prec':>7}{'Rec':>7}{'F1':>7}{'Spec':>7}")
+    for est, ref, cls, _reg in rows:
+        if not cls:
+            print(f"{est:<16}{ref:<10}  нет пересечения по времени")
+            continue
+        print(f"{est:<16}{ref:<10}{cls['n']:>5}  "
+              f"{cls['tp']:>5}{cls['fp']:>5}{cls['fn']:>5}{cls['tn']:>5}  "
+              f"{cls['accuracy']:>7.3f}{cls['precision']:>7.3f}"
+              f"{cls['recall']:>7.3f}{cls['f1']:>7.3f}{cls['specificity']:>7.3f}")
+    print()
+    print("Регрессионные метрики ошибки |V|  (м/с, R² — безразмерное)")
+    print("-" * 96)
+    print(f"{'estimator':<16}{'reference':<10}{'MAE':>8}{'RMSE':>8}{'bias':>9}"
+          f"{'max|err|':>10}{'R²':>8}")
+    for est, ref, _cls, reg in rows:
+        if not reg:
+            continue
+        print(f"{est:<16}{ref:<10}{reg['mae']:>8.3f}{reg['rmse']:>8.3f}"
+              f"{reg['bias']:>+9.3f}{reg['max_abs']:>10.3f}{reg['r2']:>8.3f}")
+    print("=" * 96)
+    print()
+
+
 def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
                              aeva_path: "str | None" = None,
                              radar_path: "str | None" = None,
-                             inlier_threshold: float = 0.5) -> None:
+                             inlier_threshold: float = 0.5,
+                             motion_threshold: float = 0.5) -> None:
     """
     Графики модуля скорости и угловой скорости рыскания.
 
@@ -342,6 +439,41 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
                 print(f"\n[Radar ICP] Готово: {len(r_yaw_rates)} пар")
                 ts_radar_icp_plot = np.array(r_ts_mid)
                 yaw_rate_radar_icp_plot = uniform_filter1d(np.array(r_yaw_rates), size=5)
+
+    # Метрики качества оценок |V| относительно INS/GPS (ground truth)
+    # Адаптация под классификацию: для каждой пары интерполируем reference
+    # на метки оценщика, бинаризуем по motion_threshold, считаем
+    # confusion matrix + accuracy/precision/recall/F1 для класса "движется".
+    # Реgress-метрики (MAE/RMSE/bias/max|err|/R²) считаем на тех же выровненных рядах.
+    ins_win = (ts_ins_plot >= plot_t_min) & (ts_ins_plot <= plot_t_max)
+    ts_ins_win, speed_ins_win = ts_ins_plot[ins_win], speed_ins_plot[ins_win]
+    gps_win = (ts_gps_plot >= plot_t_min) & (ts_gps_plot <= plot_t_max)
+    ts_gps_win, speed_gps_win = ts_gps_plot[gps_win], speed_gps_plot[gps_win]
+
+    def _eval_pair(name_est, ts_e, v_e, name_ref, ts_r, v_r):
+        aligned = _resample_reference(ts_e, v_e, ts_r, v_r)
+        if aligned is None:
+            return (name_est, name_ref, {}, {})
+        _t, v_e_a, v_r_a = aligned
+        return (name_est, name_ref,
+                _classification_metrics(v_e_a, v_r_a, motion_threshold),
+                _regression_metrics(v_e_a, v_r_a))
+
+    metric_rows = []
+    if ts_aeva_plot is not None and len(ts_aeva_plot) > 0:
+        metric_rows.append(_eval_pair("Aeva (RANSAC)", ts_aeva_plot, speed_aeva_plot,
+                                      "ИНС", ts_ins_win, speed_ins_win))
+        metric_rows.append(_eval_pair("Aeva (RANSAC)", ts_aeva_plot, speed_aeva_plot,
+                                      "GPS", ts_gps_win, speed_gps_win))
+    if ts_radar_plot is not None and len(ts_radar_plot) > 0:
+        metric_rows.append(_eval_pair("Radar (RANSAC)", ts_radar_plot, speed_radar_plot,
+                                      "ИНС", ts_ins_win, speed_ins_win))
+        metric_rows.append(_eval_pair("Radar (RANSAC)", ts_radar_plot, speed_radar_plot,
+                                      "GPS", ts_gps_win, speed_gps_win))
+    # sanity-check согласованности двух источников ground truth
+    metric_rows.append(_eval_pair("GPS", ts_gps_win, speed_gps_win,
+                                  "ИНС", ts_ins_win, speed_ins_win))
+    _print_metrics_report(metric_rows, motion_threshold)
 
     # Детекция пиков угловой скорости (только N самых выраженных)
     from scipy.signal import find_peaks
