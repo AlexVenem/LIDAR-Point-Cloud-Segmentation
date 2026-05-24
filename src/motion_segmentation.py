@@ -10,6 +10,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 
 from src.core.pointcloud import PointCloud
+from src.core.bbox import BBox3D, OBB, compute_cluster_obbs
 from src.io.bin_reader import read_kitti_bin
 from src.io.label_reader import read_label
 
@@ -274,61 +275,96 @@ def _two_stage_dbscan(
 
     return labels
 
-
-# Oriented bounding box for detected clusters
-@dataclass
-class OBB:
-    """Ориентированный 3D bounding box для одного кластера."""
-    center: np.ndarray # центр в системе координат сенсора
-    extent: np.ndarray # длины сторон вдоль главных осей
-    R: np.ndarray      # поворот: главные оси -> мир
-    cluster_id: int
-    n_points: int
-
-    def corners(self) -> np.ndarray:
-        """8 вершин бокса в мировых координатах, форма (8, 3)."""
-        ax, ay, az = self.extent / 2.0
-        local = np.array([
-            [-ax, -ay, -az], [ ax, -ay, -az], [ ax,  ay, -az], [-ax,  ay, -az],
-            [-ax, -ay,  az], [ ax, -ay,  az], [ ax,  ay,  az], [-ax,  ay,  az],
-        ], dtype=np.float64)
-        return (self.R @ local.T).T + self.center
-
-
-def compute_cluster_obbs(pc: PointCloud, cluster_ids: np.ndarray) -> List[OBB]:
+def filter_motion_clusters(
+    pc: PointCloud,
+    cluster_ids: np.ndarray,
+    ego_params: "np.ndarray | None" = None,
+    min_cluster_points: int = 15,
+    min_mean_residual: float = 0.35,
+    min_moving_ratio: float = 0.55,
+    residual_threshold: float = 0.30,
+    min_abs_mean_vr: float = 0.08,
+) -> np.ndarray:
     """
-    Для каждого DBSCAN-кластера (id >= 0) построить ориентированный bounding box
-    через PCA Open3D. Кластеры, для которых OBB не строится (вырожденная геометрия),
-    пропускаются.
+    Постфильтрация DBSCAN-кластеров по признакам движения.
+
+    Удаляет кластеры, которые геометрически есть, но по Doppler/RANSAC
+    больше похожи на статичные стены, фасады, бордюры или шум.
+
+    Returns
+    -------
+    filtered_ids : np.ndarray
+        cluster_ids той же формы:
+        -2 -> static
+        -1 -> noise
+        >=0 -> валидный движущийся кластер
     """
-    import open3d as o3d
+    filtered_ids = cluster_ids.copy()
 
-    MIN_CLUSTER_POINTS = 15
+    if pc.velocity is None or ego_params is None:
+        return filtered_ids
 
-    obbs: List[OBB] = []
-    for cid in np.unique(cluster_ids[cluster_ids >= 0]):
-        if int((cluster_ids == cid).sum()) < MIN_CLUSTER_POINTS:
-            continue
+    x = pc.xyz[:, 0]
+    y = pc.xyz[:, 1]
+    alpha = np.arctan2(y, x)
+
+    vr = pc.velocity.astype(np.float64)
+
+    vr_expected = (
+        -float(ego_params[0]) * np.cos(alpha)
+        -float(ego_params[1]) * np.sin(alpha)
+    )
+
+    residual = np.abs(vr - vr_expected)
+
+    valid_cids = np.unique(cluster_ids[cluster_ids >= 0])
+
+    for cid in valid_cids:
         mask = cluster_ids == cid
-        pts = pc.xyz[mask].astype(np.float64)
+        n_points = int(mask.sum())
 
-        try:
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(pts)
-            obb = pcd.get_oriented_bounding_box()
-        except RuntimeError:
-            # Open3D кидает RuntimeError если точки коллинеарны/копланарны
+        if n_points < min_cluster_points:
+            filtered_ids[mask] = -1
             continue
 
-        obbs.append(OBB(
-            center=np.asarray(obb.center, dtype=np.float64),
-            extent=np.asarray(obb.extent, dtype=np.float64),
-            R=np.asarray(obb.R, dtype=np.float64),
-            cluster_id=int(cid),
-            n_points=int(mask.sum()),
-        ))
-    return obbs
+        cluster_residual = residual[mask]
+        cluster_vr = vr[mask]
 
+        mean_residual = float(np.mean(cluster_residual))
+        moving_ratio = float(np.mean(cluster_residual > residual_threshold))
+        abs_mean_vr = float(abs(np.mean(cluster_vr)))
+
+        # Кластер похож на статичный объект:
+        # residual маленький или только малая часть точек реально "движется".
+        if mean_residual < min_mean_residual:
+            filtered_ids[mask] = -1
+            continue
+
+        if moving_ratio < min_moving_ratio:
+            filtered_ids[mask] = -1
+            continue
+
+        # Почти нулевая средняя радиальная скорость часто даёт мусорные кластеры.
+        if abs_mean_vr < min_abs_mean_vr:
+            filtered_ids[mask] = -1
+            continue
+
+    return filtered_ids
+
+def relabel_clusters(cluster_ids: np.ndarray) -> np.ndarray:
+    """
+    Перенумеровывает валидные DBSCAN-кластеры подряд: 0, 1, 2, ...
+
+    -2 остается static
+    -1 остается noise
+    """
+    relabeled = cluster_ids.copy()
+    valid_cids = np.unique(cluster_ids[cluster_ids >= 0])
+
+    for new_id, old_id in enumerate(valid_cids):
+        relabeled[cluster_ids == old_id] = new_id
+
+    return relabeled
 
 # MotionSegmenter – main class
 class MotionSegmenter:

@@ -6,7 +6,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.config import GPS_MAP_FILE
+from src.config import GPS_MAP_FILE, STEREO_LEFT_K, T_STEREO_LEFT_AEVA
+
 
 
 def _find_closest_camera_image(camera_dir: str, lidar_ts: int):
@@ -111,7 +112,8 @@ def main() -> None:
         return
 
     if args.action == "mos":
-        from src.motion_segmentation import MotionSegmenter, cluster_moving_objects, compute_cluster_obbs
+        from src.motion_segmentation import MotionSegmenter, cluster_moving_objects, filter_motion_clusters, relabel_clusters
+        from src.core.bbox import compute_cluster_obbs
         from src.viz.plots import plot_mos
 
         # Загрузка кадра через loader, соответствующий --dataset
@@ -159,14 +161,31 @@ def main() -> None:
         n_total = len(is_moving)
         print(f"Moving: {n_moving}/{n_total} points ({100*n_moving/n_total:.1f}%)")
 
+        
         # DBSCAN кластеризация движущихся точек (4D: xyz + Vr)
         cluster_ids = cluster_moving_objects(
-            pc, is_moving,
+            pc,
+            is_moving,
             eps_xyz=args.eps_xyz,
             eps_vr=args.eps_vr,
             min_samples=args.min_samples,
             two_stage=not args.single_stage,
         )
+
+        #Postfilter
+        cluster_ids = filter_motion_clusters(
+            pc,
+            cluster_ids,
+            ego_params=ego_params,
+            min_cluster_points=15,
+            min_mean_residual=0.40,
+            min_moving_ratio=0.60,
+            residual_threshold=0.30,
+            min_abs_mean_vr=0.10,
+        )
+        cluster_ids = relabel_clusters(cluster_ids)
+
+
         unique_cluster_ids = np.unique(cluster_ids[cluster_ids >= 0])
         obbs = compute_cluster_obbs(pc, cluster_ids) if len(unique_cluster_ids) > 0 else []
         obb_by_cid = {o.cluster_id: o for o in obbs}
@@ -213,7 +232,7 @@ def main() -> None:
             )
         else:
             plot_mos(pc, is_moving, ego_params=ego_params, camera_img=camera_img,
-                     cluster_ids=cluster_ids, obbs=obbs)
+                     cluster_ids=cluster_ids, obbs=obbs, camera_k=STEREO_LEFT_K, t_cam_lidar=T_STEREO_LEFT_AEVA)
         return
 
     if args.action == "mos-sequence":

@@ -672,6 +672,8 @@ def plot_mos(
     camera_img: "np.ndarray | None" = None,
     cluster_ids: "np.ndarray | None" = None,
     obbs: "list | None" = None,
+    camera_k: "np.ndarray | None" = None,
+    t_cam_lidar: "np.ndarray | None" = None,
 ) -> None:
     """
     2D-графики MOS-результата (static vs moving) с опциональным кадром камеры.
@@ -704,23 +706,10 @@ def plot_mos(
     static_mask = ~is_moving
 
     # Build figure layout
-    if camera_img is not None:
-        if has_velocity:
-            fig = plt.figure(figsize=(16, 12))
-            gs = fig.add_gridspec(2, 2, height_ratios=[1, 0.65], hspace=0.35, wspace=0.3)
-            ax_vel = fig.add_subplot(gs[0, 0])
-            ax_bev = fig.add_subplot(gs[0, 1])
-            ax_cam = fig.add_subplot(gs[1, :])
-        else:
-            fig = plt.figure(figsize=(14, 10))
-            gs = fig.add_gridspec(2, 1, height_ratios=[1, 0.65], hspace=0.35)
-            ax_bev = fig.add_subplot(gs[0])
-            ax_cam = fig.add_subplot(gs[1])
+    if has_velocity:
+        fig, (ax_vel, ax_bev) = plt.subplots(1, 2, figsize=(16, 7))
     else:
-        if has_velocity:
-            fig, (ax_vel, ax_bev) = plt.subplots(1, 2, figsize=(16, 7))
-        else:
-            fig, ax_bev = plt.subplots(1, 1, figsize=(9, 7))
+        fig, ax_bev = plt.subplots(1, 1, figsize=(9, 7))
 
     if title:
         fig.suptitle(title, fontsize=13)
@@ -826,9 +815,25 @@ def plot_mos(
 
     # Camera image
     if camera_img is not None:
-        ax_cam.imshow(camera_img)
-        ax_cam.set_title("Stereo Left Camera", fontsize=10)
-        ax_cam.axis("off")
+        fig_cam, ax_cam_big = plt.subplots(1, 1, figsize=(16, 9))
+
+    ax_cam_big.imshow(camera_img)
+
+    if obbs and camera_k is not None and t_cam_lidar is not None:
+        from src.viz.projection import draw_projected_obb
+
+        for obb in obbs:
+            draw_projected_obb(
+                ax=ax_cam_big,
+                obb=obb,
+                k_matrix=camera_k,
+                t_cam_lidar=t_cam_lidar,
+                image_shape=camera_img.shape,
+            )
+
+    ax_cam_big.set_title("Stereo Left Camera + projected OBB", fontsize=12)
+    ax_cam_big.axis("off")
+    fig_cam.tight_layout()
 
     plt.tight_layout()
     plt.show()
