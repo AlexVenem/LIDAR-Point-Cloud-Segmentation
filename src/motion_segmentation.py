@@ -615,12 +615,16 @@ class MotionSegmenter:
         }, path)
         print(f"[MOS] Model saved → {path}  (threshold={self.threshold})")
 
-    def load(self, path: str) -> None:
+    def load(self, path: str, override_threshold: bool = False) -> None:
         """Load a previously saved model from disk."""
         data = joblib.load(path)
         self.classifier = data["classifier"]
         self.scaler = data["scaler"]
-        self.threshold = data.get("threshold", 0.85)
+        saved_threshold = data.get("threshold", 0.85)
+
+        if not override_threshold:
+            self.threshold = saved_threshold
+
         print(f"[MOS] Model loaded ← {path}  (threshold={self.threshold})")
 
 # Dataset helpers (HeLiMOS)
