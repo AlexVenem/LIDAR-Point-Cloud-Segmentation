@@ -9,7 +9,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.config import GPS_MAP_FILE, STEREO_LEFT_K, T_STEREO_LEFT_AEVA
 
 
-
 def _find_closest_camera_image(camera_dir: str, lidar_ts: int):
     """
     Находит изображение с камеры, чья временная метка ближе всего к
@@ -35,18 +34,18 @@ def _find_closest_camera_image(camera_dir: str, lidar_ts: int):
 def main() -> None:
     parser = argparse.ArgumentParser(description="LiDAR processing CLI")
     parser.add_argument("--dataset", choices=["helimos", "helipr", "hercules"],
-        required=True) # возможно, указания конкретного датасета не нужно или просто необязательно
-    parser.add_argument("--bin", type=str, required=False) # возможно, стоит переименовать на lidar_bin или убрать --radar опцию
+        required=True)
+    parser.add_argument("--bin", type=str, required=False)
     parser.add_argument("--ins", type=str, required=False, help="Путь к INS CSV файлу")
     parser.add_argument("--imu", type=str, required=False, help="Путь к IMU CSV файлу")
     parser.add_argument("--gps", type=str, required=False, help="Путь к GPS CSV файлу")
-    parser.add_argument("--radar", type=str, required=False, help="Путь к Radar BIN файлу") # возможно переименовать на radar_bin или убрать вообще
+    parser.add_argument("--radar", type=str, required=False, help="Путь к Radar BIN файлу")
     parser.add_argument("--action",
                         choices=["cloud", "velocity", "ego-velocity", "map", "track", "accel",
                                  "mos", "mos-train", "mos-sequence"],
-                        required=True) # наверное, mos-sequence можно убрать. И вообще все, что касается mos на последовательности кадров
+                        required=True)
     parser.add_argument("--output", type=str, required=False, default=GPS_MAP_FILE,
-                        help=f"Путь для сохранения HTML карты GPS (по умолчанию: {GPS_MAP_FILE})") # возможно, стоит написать output_map
+                        help=f"Путь для сохранения HTML карты GPS (по умолчанию: {GPS_MAP_FILE})")
 
     # MOS-specific arguments
     parser.add_argument("--model", type=str, required=False, default="models/mos_rf.pkl",
@@ -56,15 +55,15 @@ def main() -> None:
                         help="Тип сенсора для HeLiMOS (по умолчанию: Velodyne)")
     parser.add_argument("--split", type=str, required=False, default="train",
                         choices=["train", "val", "test"],
-                        help="Раздел датасета для обучения (по умолчанию: train)") # fix: убрать "для обучения" в help
+                        help="Раздел датасета для обучения (по умолчанию: train)")
     parser.add_argument("--max-frames", type=int, required=False, default=None,
                         help="Максимальное число кадров для обучения/инференса")
     parser.add_argument("--n-frames", type=int, required=False, default=5,
-                        help="Число кадров для mos-sequence (по умолчанию: 5)") # возможно, вообще убрать
+                        help="Число кадров для mos-sequence (по умолчанию: 5)")
     parser.add_argument("--sequence", type=str, required=False,
-                        help="Путь к корню датасета Deskewed_LiDAR для mos-sequence") # возможно, вообще убрать
+                        help="Путь к корню датасета Deskewed_LiDAR для mos-sequence")
     parser.add_argument("--n-context", type=int, required=False, default=3,
-                        help="Размер временного окна для temporal MOS (по умолчанию: 3)") # возможно, вообще убрать
+                        help="Размер временного окна для temporal MOS (по умолчанию: 3)")
     parser.add_argument("--disable-temporal", action="store_true",
                         help="Отключить temporal consistency (pose-based) для mos-sequence; по умолчанию: включено при наличии поз")
     parser.add_argument("--threshold", type=float, required=False, default=0.85,
@@ -75,15 +74,15 @@ def main() -> None:
                         help="Папка со снимками стерео-камеры. "
                              "Ближайший по временной метке кадр добавляется к MOS-графику.")
     parser.add_argument("--gpu", action="store_true",
-                        help="Использовать GPU (XGBoost CUDA) вместо CPU (Random Forest) для обучения MOS") # хз, надо ли
+                        help="Использовать GPU (XGBoost CUDA) вместо CPU (Random Forest) для обучения MOS")
     parser.add_argument("--aeva", type=str, required=False,
-                        help="Папка с .bin кадрами Aeva для mos-sequence (например 03_Day/Aeva)") # думаю, лишнее
+                        help="Папка с .bin кадрами Aeva для mos-sequence (например 03_Day/Aeva)")
     parser.add_argument("--dpi", type=int, required=False, default=120,
                         help="DPI сохраняемых PNG для mos-sequence (по умолчанию: 120)")
     parser.add_argument("--start", type=int, required=False, default=0,
-                        help="Начальный индекс кадра для mos-sequence (по умолчанию: 0)") # возможно, вообще убрать
+                        help="Начальный индекс кадра для mos-sequence (по умолчанию: 0)")
     parser.add_argument("--3d", dest="show_3d", action="store_true",
-                        help="Показать 3D-визуализацию через Open3D (для action=mos)") # не уверен, что надо
+                        help="Показать 3D-визуализацию через Open3D (для action=mos)")
     parser.add_argument("--eps-xyz", type=float, default=1.0,
                         help="DBSCAN: пространственный радиус, м (по умолчанию: 1.0)")
     parser.add_argument("--eps-vr", type=float, default=0.5,
@@ -101,11 +100,11 @@ def main() -> None:
 
         data_root = args.sequence or "data/Deskewed_LiDAR" # путь к данным
         seg = MotionSegmenter(threshold=args.threshold, 
-                              inlier_threshold=args.inlier_threshold, use_gpu=args.gpu) # думаю, не надо подавать inlier_threshold
+                              inlier_threshold=args.inlier_threshold, use_gpu=args.gpu)
         seg.train_on_helimos(
             data_root=data_root,
             sensor=args.sensor,
-            split=args.split, # возможно, split аргумент не нужен
+            split=args.split,
             max_frames=args.max_frames,
         )
         seg.save(args.model)
@@ -135,7 +134,7 @@ def main() -> None:
                 print("Ошибка: для action=mos с hercules требуется --bin или --radar")
                 return
         else:
-            # helimos — KITTI формат
+            # helimos - KITTI формат
             from src.datasets.helimos import load_helimos_frame
             if not args.bin:
                 print("Ошибка: для action=mos требуется --bin <путь_к_файлу.bin>")
@@ -161,7 +160,6 @@ def main() -> None:
         n_total = len(is_moving)
         print(f"Moving: {n_moving}/{n_total} points ({100*n_moving/n_total:.1f}%)")
 
-        
         # DBSCAN кластеризация движущихся точек (4D: xyz + Vr)
         cluster_ids = cluster_moving_objects(
             pc,
@@ -184,7 +182,6 @@ def main() -> None:
             min_abs_mean_vr=0.10,
         )
         cluster_ids = relabel_clusters(cluster_ids)
-
 
         unique_cluster_ids = np.unique(cluster_ids[cluster_ids >= 0])
         obbs = compute_cluster_obbs(pc, cluster_ids) if len(unique_cluster_ids) > 0 else []
@@ -219,7 +216,7 @@ def main() -> None:
                 else:
                     print("Предупреждение: камерных изображений в указанной папке не найдено.")
             else:
-                print("Предупреждение: имя .bin-файла не является временной меткой — камера проигнорирована.")
+                print("Предупреждение: имя .bin-файла не является временной меткой - камера проигнорирована.")
 
         if args.show_3d:
             from src.viz.clouds import visualize_mos

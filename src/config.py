@@ -1,61 +1,36 @@
-"""
-Конфиг файл с константами путей и параметров проекта.
-"""
-
 import os
 import numpy as np
 
 # Получаем корневую директорию проекта
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# ============================================================================
 # ПУТИ К ДАННЫМ
-# ============================================================================
-
 # Директория с исходными данными
 DATA_DIR = os.path.join(PROJECT_ROOT, '03_Day')
-
-# Путь к папке с сенсорными данными
 SENSOR_DATA_DIR = os.path.join(DATA_DIR, 'sensor_data')
-
-# GPS данные
 GPS_DATA_FILE = os.path.join(SENSOR_DATA_DIR, 'gps.csv')
-
 # INS/IMU данные (INSPVA)
 INSPVA_DATA_FILE = os.path.join(SENSOR_DATA_DIR, 'inspva.csv')
-
 # Другие сенсорные данные
 AEVA_DATA_FILE = os.path.join(SENSOR_DATA_DIR, 'aeva_stamp.csv')
 CONTINENTAL_DATA_FILE = os.path.join(SENSOR_DATA_DIR, 'continental_stamp.csv')
 NAVTECH_DATA_FILE = os.path.join(SENSOR_DATA_DIR, 'navtech_stamp.csv')
 STEREO_DATA_FILE = os.path.join(SENSOR_DATA_DIR, 'stereo_stamp.csv')
 XSENS_IMU_FILE = os.path.join(SENSOR_DATA_DIR, 'xsens_imu.csv')
-
-# Директория с калибровкой
 CALIBRATION_DIR = os.path.join(DATA_DIR, 'Calibration')
-
-# Директория с ground truth
 GT_DIR = os.path.join(DATA_DIR, 'PR_GT')
 
-# ============================================================================
 # ПУТИ К ВЫХОДНЫМ ФАЙЛАМ
-# ============================================================================
-
 # Директория для сохранения результатов (по умолчанию корневая директория)
 OUTPUT_DIR = PROJECT_ROOT
-
 # GPS карты
 GPS_MAP_FILE = os.path.join(OUTPUT_DIR, 'gps_map.html')
 GPS_TRAJECTORY_MAP_FILE = os.path.join(OUTPUT_DIR, 'gps_trajectory_map.html')
-
 # Другие выходные файлы
 POINT_CLOUD_VIS_FILE = os.path.join(OUTPUT_DIR, 'point_cloud_vis.html')
 VELOCITY_PLOT_FILE = os.path.join(OUTPUT_DIR, 'velocity_plot.png')
 
-# ============================================================================
 # ПАРАМЕТРЫ ВИЗУАЛИЗАЦИИ
-# ============================================================================
-
 # Параметры для GPS карт
 MAP_ZOOM_LEVEL = 18  # Уровень приближения на карте (1-19)
 MAP_TILES = 'OpenStreetMap'  # Тип карты (OpenStreetMap, Stamen, CartoDB и т.д.)
@@ -63,7 +38,6 @@ POLYLINE_COLOR = 'blue'  # Цвет линии траектории
 POLYLINE_WEIGHT = 2  # Толщина линии
 START_MARKER_COLOR = 'green'  # Цвет маркера начала
 END_MARKER_COLOR = 'red'  # Цвет маркера конца
-
 # Параметры для облаков точек
 POINT_SIZE = 1  # Размер точек при визуализации
 COLORMAP = 'viridis'  # Колормап для интенсивности
@@ -74,7 +48,6 @@ STEREO_LEFT_K = np.array([
     [0.0, 489.9420108174773, 582.3039081302234],
     [0.0, 0.0, 1.0],
 ], dtype=np.float64)
-
 T_STEREO_LEFT_AEVA = np.array([
     [0.022023532009715, -0.999669977147658, 0.013225007652863, 0.254288466421238],
     [-0.049191798363281, -0.014295738779819, -0.998687037477971, -0.108349681409513],
@@ -82,9 +55,40 @@ T_STEREO_LEFT_AEVA = np.array([
     [0.0, 0.0, 0.0, 1.0],
 ], dtype=np.float64)
 
-# ============================================================================
 # ПАРАМЕТРЫ ОБРАБОТКИ
-# ============================================================================
-
 # Точность прочтения бинарных файлов
 FLOAT_PRECISION = np.float32
+
+# MOTION OBJECT SEGMENTATION (MOS)
+# HeLiMOS ground truth labels for binary MOS
+MOS_STATIC_LABEL = 9
+MOS_MOVING_LABEL = 251
+# RANSAC ego-motion estimation parameters
+RANSAC_N_ITERATIONS = 300
+RANSAC_INLIER_THRESHOLD = 0.3
+RANSAC_SEED = 0
+# DBSCAN clustering parameters (4D: xyz + velocity)
+DBSCAN_EPS_XYZ = 1.0
+DBSCAN_EPS_VR = 0.5
+DBSCAN_MIN_SAMPLES = 8
+# Random Forest classifier parameters
+RF_N_ESTIMATORS = 100
+RF_MAX_DEPTH = 15
+RF_MIN_SAMPLES_LEAF = 10
+# XGBoost classifier parameters (GPU variant)
+XGB_N_ESTIMATORS = 300
+XGB_MAX_DEPTH = 10
+XGB_LEARNING_RATE = 0.1
+XGB_SUBSAMPLE = 0.8
+XGB_COLSAMPLE_BYTREE = 0.8
+# MOS default inference thresholds
+MOS_DEFAULT_THRESHOLD = 0.85
+MOS_DEFAULT_INLIER_THRESHOLD = 0.3
+# Post-filtering parameters for DBSCAN clusters
+MOS_MIN_CLUSTER_POINTS = 15
+MOS_MIN_MEAN_RESIDUAL = 0.40
+MOS_MIN_MOVING_RATIO = 0.60
+MOS_RESIDUAL_THRESHOLD = 0.30
+MOS_MIN_ABS_MEAN_VR = 0.10
+# Training dataset limits
+MOS_MAX_TRAIN_POINTS = 2_000_000

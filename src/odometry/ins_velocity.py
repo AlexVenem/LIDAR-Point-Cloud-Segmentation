@@ -4,9 +4,6 @@ import numpy as np
 def INS_to_V(INS):
     """
     Преобразование INS-скоростей (NED) в ECEF-скорости (Vx, Vy, Vz).
-
-    Для каждой точки строится матрица поворота R из локальной NED-системы
-    в ECEF по текущей широте и долготе, затем Vxyz = R @ [Ve, Vn, Vu].
     
     Parameters:
         INS : dict-like (DataFrame) с ключами:
