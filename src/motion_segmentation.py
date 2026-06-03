@@ -1,6 +1,5 @@
 import os
 from collections import defaultdict
-from dataclasses import dataclass
 from typing import Iterator, List, Optional, Tuple
 
 import joblib
@@ -9,66 +8,61 @@ from sklearn.cluster import DBSCAN
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 
+from src.config import (
+    MOS_STATIC_LABEL,
+    MOS_MOVING_LABEL,
+    RANSAC_N_ITERATIONS,
+    RANSAC_INLIER_THRESHOLD,
+    RANSAC_SEED,
+    DBSCAN_EPS_XYZ,
+    DBSCAN_EPS_VR,
+    DBSCAN_MIN_SAMPLES,
+    MOS_DEFAULT_THRESHOLD,
+    MOS_DEFAULT_INLIER_THRESHOLD,
+    MOS_MAX_TRAIN_POINTS,
+    RF_N_ESTIMATORS,
+    RF_MAX_DEPTH,
+    RF_MIN_SAMPLES_LEAF,
+    XGB_N_ESTIMATORS,
+    XGB_MAX_DEPTH,
+    XGB_LEARNING_RATE,
+    XGB_SUBSAMPLE,
+    XGB_COLSAMPLE_BYTREE,
+    MOS_MIN_CLUSTER_POINTS,
+    MOS_MIN_MEAN_RESIDUAL,
+    MOS_MIN_MOVING_RATIO,
+    MOS_RESIDUAL_THRESHOLD,
+    MOS_MIN_ABS_MEAN_VR,
+)
 from src.core.pointcloud import PointCloud
-from src.core.bbox import BBox3D, OBB, compute_cluster_obbs
 from src.io.bin_reader import read_kitti_bin
 from src.io.label_reader import read_label
 
-# HeLiMOS label constants (binary MOS variant)
-STATIC_LABEL = 9    # static environment
-MOVING_LABEL = 251  # moving object
-
-# Feature extraction
 def _extract_features(pc: PointCloud) -> np.ndarray:
-    """
-    Извлечь матрицу признаков для каждой точки из облака точек.
-
-    Feature columns
-    ---------------
-    0: x   1: y   2: z
-    3: range (3D расстояние от сенсора)
-    4: azimuth   [rad]
-    5: elevation [rad]
-    6: intensity  (0 если нет)
-    7: radial velocity (только если pc.velocity не None)
-
-    Returns
-    -------
-    ndarray (N, 7) или (N, 8)
-    """
+    """[x, y, z, range, azimuth, elevation, intensity, velocity(opt)]"""
     x, y, z = pc.xyz[:, 0], pc.xyz[:, 1], pc.xyz[:, 2]
     xy = np.sqrt(x ** 2 + y ** 2)
-    rng = np.sqrt(xy ** 2 + z ** 2) # расстояние от сенсора до точки
+    rng = np.sqrt(xy ** 2 + z ** 2)
     azimuth = np.arctan2(y, x)
-    elevation = np.arctan2(z, xy + 1e-9) # вертикальный угол
+    elevation = np.arctan2(z, xy + 1e-9)
 
     intensity = pc.intensity if pc.intensity is not None else np.zeros_like(x)
     feats = [x, y, z, rng, azimuth, elevation, intensity]
 
-    if pc.velocity is not None: # Допплеровская скорость
+    if pc.velocity is not None:
         feats.append(pc.velocity)
 
     return np.stack(feats, axis=1).astype(np.float32)
 
-# RANSAC ego-motion (for Doppler-capable sensors)
 def ransac_ego_motion(
     pc: PointCloud,
-    n_iterations: int = 300,
-    inlier_threshold: float = 0.3,
-    seed: int = 0,
+    n_iterations: int = RANSAC_N_ITERATIONS,
+    inlier_threshold: float = RANSAC_INLIER_THRESHOLD,
+    seed: int = RANSAC_SEED,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Оценивает ego-velocity с помощью радиальных скоростей объектов и RANSAC.
-
-    Parameters:
-        pc               : PointCloud с не-None радиальными скоростями
-        n_iterations     : кол-во RANSAC итераций
-        inlier_threshold : порог для отнесения точки к стационарной
-        seed             : RNG seed для воспроизведения
-
-    Returns:
-        params     : np.ndarray, shape (2,) — оцененные [V_x, V_y]
-        is_static  : bool ndarray, shape (N,) — True для стационарных точек
+    Оценка эго-скорости [Vx, Vy] по радиальным скоростям Доплера через RANSAC.
+    Возвращает вектор скорости платформы и маску статичных точек.
     """
     assert pc.velocity is not None, "RANSAC requires per-point Doppler velocity."
 
@@ -106,9 +100,8 @@ def ransac_ego_motion(
 
     return params.astype(np.float32), is_static
 
-# Temporal consistency (pose-based)
 def _pose_to_se3(row: np.ndarray) -> np.ndarray:
-    """Convert a 12-element 3×4 pose row to a 4×4 SE(3) matrix."""
+    """12-элементная строка из poses.txt -> матрица SE(3) 4x4."""
     T = np.eye(4, dtype=np.float64)
     T[:3, :] = row.reshape(3, 4)
     return T
@@ -121,29 +114,17 @@ def temporal_consistency_segment(
     moving_threshold: float = 0.35,
 ) -> List[np.ndarray]:
     """
-    Classify points using temporal voxel-occupancy consistency.
+    Классификация точек по воксельной занятости во временном окне.
 
-    Algorithm:
-    For each frame i, transform all points from the ±n_context window into
-    frame i's coordinate system. Build a voxel occupancy map and record
-    which frames contributed points to each voxel.
-
-    A voxel occupied by many frames -> static environment.
-    A voxel occupied by only 1–2 frames -> moving object (it was elsewhere
-    in the other frames).
-
-    Parameters:
-        frames           : N consecutive PointCloud objects
-        poses            : (N, 12) array of 3×4 SE(3) poses (rows from poses.txt)
-        n_context        : half-width of the temporal window
-        voxel_size       : spatial resolution [m]
-        moving_threshold : temporal-occupancy fraction below which a point is considered moving
-
-    Returns:
-        List of bool arrays (True = moving), one per input frame.
+    Для каждого кадра i трансформируем точки из +-n_context соседних кадров
+    в его систему координат. Воксель, в который попали точки из многих кадров —
+    статика; из одного-двух — скорее всего движущийся объект.
     """
     n = len(frames)
     assert len(poses) >= n, "Need one pose per frame."
+
+    # упаковываем позы в SE(3) заранее, чтобы не пересчитывать внутри цикла
+    STRIDE = 20001  # предполагаем не более +-10000 вокселей по каждой оси
 
     Ts = [_pose_to_se3(poses[i]) for i in range(n)]
     results: List[np.ndarray] = []
@@ -154,38 +135,31 @@ def temporal_consistency_segment(
         hi = min(n, i + n_context + 1)
         n_window = hi - lo
 
-        # Map from voxel key -> set of frame indices that put a point there
-        voxel_frames: dict = defaultdict(set)
+        voxel_frames = defaultdict(set)
 
         for j in range(lo, hi):
             T_rel = T_inv_i @ Ts[j]
             pts = frames[j].xyz.astype(np.float64)
-            pts_h = np.hstack([pts, np.ones((len(pts), 1))])  # добавляем столбец единиц для будущего нормального перемножения матриц
-            pts_t = (T_rel @ pts_h.T)[:3].T  # переводим точку кадра j в систему координат кадра i
+            pts_h = np.hstack([pts, np.ones((len(pts), 1))])
+            pts_t = (T_rel @ pts_h.T)[:3].T
 
-            # Encode voxel index as a single int64 for fast hashing
             vi = np.floor(pts_t / voxel_size).astype(np.int64)
-            # Cantor-style linear key (assumes ±10 000 voxels per axis)
-            STRIDE = 20001
-            keys = vi[:, 0] * STRIDE * STRIDE + vi[:, 1] * STRIDE + vi[:, 2] # кодируем координаты вокселя в одно число
+            keys = vi[:, 0] * STRIDE * STRIDE + vi[:, 1] * STRIDE + vi[:, 2]
             for k in keys:
-                voxel_frames[int(k)].add(j) # для каждого вокселя храним все различные номера кадров, точки которых попадают в этот воксель
+                voxel_frames[int(k)].add(j)
 
-        # Score current-frame points
         pts_i = frames[i].xyz.astype(np.float64)
         vi_i = np.floor(pts_i / voxel_size).astype(np.int64)
-        STRIDE = 20001
         keys_i = vi_i[:, 0] * STRIDE * STRIDE + vi_i[:, 1] * STRIDE + vi_i[:, 2]
 
         occupancy = np.array(
-            [len(voxel_frames.get(int(k), set())) / n_window for k in keys_i],  # для вокселя точек кадра i смотрим сколько точек кадров j туда попало
+            [len(voxel_frames.get(int(k), set())) / n_window for k in keys_i],
             dtype=np.float32,
         )
-        results.append(occupancy < moving_threshold) # чем больше попадает - тем выше шанс, что объект стационарный
+        results.append(occupancy < moving_threshold)
 
     return results
 
-# DBSCAN clustering of moving objects
 def cluster_moving_objects(
     pc: PointCloud,
     is_moving: np.ndarray,
@@ -207,8 +181,7 @@ def cluster_moving_objects(
     if len(moving_idx) < min_samples:
         return cluster_ids
 
-    # Сначала помечаем все moving точки как noise (-1)
-    cluster_ids[moving_idx] = -1
+    cluster_ids[moving_idx] = -1  # noise по умолчанию, кластеры перезапишут
 
     xyz_mov = pc.xyz[moving_idx].astype(np.float64)
     has_vel = pc.velocity is not None
@@ -241,16 +214,14 @@ def _two_stage_dbscan(
     eps_vr: float,
 ) -> np.ndarray:
     """
-    Двухэтапный DBSCAN в физических единицах.
-
-    Этап 1: кластеризация по Vr [m/s] с eps=eps_vr.
-    Этап 2: внутри каждой группы Vr — пространственная кластеризация по xyz [m]
-            с eps=eps_xyz.
+    Two-stage DBSCAN in physical units.
+    Stage 1: cluster by Vr [m/s] with eps=eps_vr.
+    Stage 2: within each Vr group, spatial clustering by xyz [m] with eps=eps_xyz.
     """
     n = len(xyz)
     labels = np.full(n, -1, dtype=np.int32)
 
-    # Этап 1: кластеризация по Vr (в м/с)
+    # Stage 1: cluster by radial velocity (m/s)
     db_vel = DBSCAN(eps=eps_vr, min_samples=min_samples, n_jobs=-1)
     vel_labels = db_vel.fit_predict(vel.reshape(-1, 1))
 
@@ -262,7 +233,7 @@ def _two_stage_dbscan(
         if len(idx) < min_samples:
             continue
 
-        # Этап 2: пространственная кластеризация (в метрах)
+        # Stage 2: spatial clustering (in meters)
         db_xyz = DBSCAN(eps=eps_xyz, min_samples=min_samples, n_jobs=-1)
         sub_labels = db_xyz.fit_predict(xyz[idx])
 
@@ -279,11 +250,11 @@ def filter_motion_clusters(
     pc: PointCloud,
     cluster_ids: np.ndarray,
     ego_params: "np.ndarray | None" = None,
-    min_cluster_points: int = 15,
-    min_mean_residual: float = 0.35,
-    min_moving_ratio: float = 0.55,
-    residual_threshold: float = 0.30,
-    min_abs_mean_vr: float = 0.08,
+    min_cluster_points: int = MOS_MIN_CLUSTER_POINTS,
+    min_mean_residual: float = MOS_MIN_MEAN_RESIDUAL,
+    min_moving_ratio: float = MOS_MIN_MOVING_RATIO,
+    residual_threshold: float = MOS_RESIDUAL_THRESHOLD,
+    min_abs_mean_vr: float = MOS_MIN_ABS_MEAN_VR,
 ) -> np.ndarray:
     """
     Постфильтрация DBSCAN-кластеров по признакам движения.
@@ -334,8 +305,6 @@ def filter_motion_clusters(
         moving_ratio = float(np.mean(cluster_residual > residual_threshold))
         abs_mean_vr = float(abs(np.mean(cluster_vr)))
 
-        # Кластер похож на статичный объект:
-        # residual маленький или только малая часть точек реально "движется".
         if mean_residual < min_mean_residual:
             filtered_ids[mask] = -1
             continue
@@ -344,7 +313,6 @@ def filter_motion_clusters(
             filtered_ids[mask] = -1
             continue
 
-        # Почти нулевая средняя радиальная скорость часто даёт мусорные кластеры.
         if abs_mean_vr < min_abs_mean_vr:
             filtered_ids[mask] = -1
             continue
@@ -353,10 +321,8 @@ def filter_motion_clusters(
 
 def relabel_clusters(cluster_ids: np.ndarray) -> np.ndarray:
     """
-    Перенумеровывает валидные DBSCAN-кластеры подряд: 0, 1, 2, ...
-
-    -2 остается static
-    -1 остается noise
+    Renumber valid DBSCAN clusters sequentially: 0, 1, 2, ...
+    Keeps -2 for static, -1 for noise.
     """
     relabeled = cluster_ids.copy()
     valid_cids = np.unique(cluster_ids[cluster_ids >= 0])
@@ -366,25 +332,20 @@ def relabel_clusters(cluster_ids: np.ndarray) -> np.ndarray:
 
     return relabeled
 
-# MotionSegmenter – main class
 class MotionSegmenter:
     """
-    Moving Object Segmentation для облака точек лидара.
-
-    - RANSAC, если все кадры в данных имеют радиальную скорость.
-    - Random Forest, иначе (требуется предварительный вызов train_on_helimos / load).
-    - XGBoost, если надо GPU
+    Moving Object Segmentation classifier for LiDAR point clouds.
+    Uses RANSAC for Doppler-capable sensors, Random Forest or XGBoost otherwise.
     """
 
-    def __init__(self, threshold: float = 0.85, inlier_threshold: float = 0.5,
-                 use_gpu: bool = False) -> None: # значения хардкодом вынести в константы конфига
+    def __init__(self, threshold: float = MOS_DEFAULT_THRESHOLD, inlier_threshold: float = MOS_DEFAULT_INLIER_THRESHOLD,
+                 use_gpu: bool = False) -> None:
         self.classifier: Optional[RandomForestClassifier] = None
         self.scaler: Optional[StandardScaler] = None
-        self.threshold = threshold  # P(moving) выше этого -> moving
-        self.inlier_threshold = inlier_threshold  # порог для RANSAC [m/s]
+        self.threshold = threshold
+        self.inlier_threshold = inlier_threshold
         self.use_gpu = use_gpu
 
-    # Training
     def train_on_helimos(
         self,
         data_root: str,
@@ -392,15 +353,7 @@ class MotionSegmenter:
         split: str = "train",
         max_frames: Optional[int] = None,
     ) -> None:
-        """
-        Обучение Random Forest (или XGBoost для GPU) классификатора на HeLiMOS размеченных данных.
-
-        Parameters:
-            data_root  : путь к Deskewed_LiDAR корню (содержит train.txt и др.)
-            sensor     : 'Velodyne', 'Ouster', 'Avia', or 'Aeva'
-            split      : 'train', 'val', or 'test'
-            max_frames : ограничение на используемые кадры (None = использовать все)
-        """
+        """Обучение RF/XGBoost на размеченных данных HeLiMOS."""
         split_file = os.path.join(data_root, f"{split}.txt")
         with open(split_file) as f:
             frame_ids = [int(ln.strip()) for ln in f if ln.strip()]
@@ -410,13 +363,13 @@ class MotionSegmenter:
 
         sensor_dir = os.path.join(data_root, sensor)
         vel_dir = os.path.join(sensor_dir, "velodyne") # путь к bin файлам
-        lbl_dir = os.path.join(sensor_dir, "labels") # путь к меткам
+        lbl_dir = os.path.join(sensor_dir, "labels")
 
         all_feats: List[np.ndarray] = []
         all_labels: List[np.ndarray] = []
         skipped = 0
 
-        print(f"[MOS] Loading {len(frame_ids)} frames  sensor={sensor}  split={split}")
+        print(f"[MOS] Loading {len(frame_ids)} frames | sensor={sensor} | split={split}")
         for i, fid in enumerate(frame_ids):
             bin_path = os.path.join(vel_dir, f"{fid:06d}.bin")
             lbl_path = os.path.join(lbl_dir, f"{fid:06d}.label")
@@ -425,19 +378,19 @@ class MotionSegmenter:
                 skipped += 1
                 continue
 
-            pc = read_kitti_bin(bin_path) # получаем облако точек из bin файла
-            semantic, _ = read_label(lbl_path) # получаем метки этих точек
+            pc = read_kitti_bin(bin_path)
+            semantic, _ = read_label(lbl_path)
 
-            mask = (semantic == STATIC_LABEL) | (semantic == MOVING_LABEL) # убираем кадры, где все точки - мусор
+            mask = (semantic == MOS_STATIC_LABEL) | (semantic == MOS_MOVING_LABEL)
             if mask.sum() == 0:
                 skipped += 1
                 continue
 
-            all_feats.append(_extract_features(pc)[mask]) # берем фичи только не мусора
-            all_labels.append((semantic[mask] == MOVING_LABEL).astype(np.int8)) 
+            all_feats.append(_extract_features(pc)[mask])
+            all_labels.append((semantic[mask] == MOS_MOVING_LABEL).astype(np.int8))
 
             if (i + 1) % 200 == 0:
-                print(f"  {i + 1}/{len(frame_ids)} frames …")
+                print(f"  {i + 1}/{len(frame_ids)} ({100*(i+1)/len(frame_ids):.0f}%)")
 
         if not all_feats:
             raise RuntimeError(
@@ -447,22 +400,18 @@ class MotionSegmenter:
         X = np.vstack(all_feats)
         y = np.concatenate(all_labels)
         print(
-            f"[MOS] Dataset: {len(X):,} points | "
-            f"{y.mean() * 100:.2f}% moving | {skipped} frames skipped"
+            f"[MOS] Loaded: {len(X):,} points | "
+            f"{y.mean() * 100:.2f}% moving | {skipped} skipped"
         )
 
-        # Субсэмплинг: берём не более max_train_points с сохранением
-        # баланса классов (все moving + случайная выборка static)
-        max_train_points = 2_000_000 # возможно, стоит вынести в константу конфига
-        if len(X) > max_train_points:
+        if len(X) > MOS_MAX_TRAIN_POINTS:
             moving_idx = np.where(y == 1)[0]
             static_idx = np.where(y == 0)[0]
 
-            # Берём все moving точки (их мало)
             n_moving = len(moving_idx)
-            n_static_budget = max_train_points - n_moving # сколько стационарных точек будем брать
+            n_static_budget = MOS_MAX_TRAIN_POINTS - n_moving
             if n_static_budget < n_moving:
-                n_static_budget = n_moving  # как минимум 1:1
+                n_static_budget = n_moving
 
             rng = np.random.default_rng(42)
             static_sample = rng.choice(
@@ -473,8 +422,8 @@ class MotionSegmenter:
             X = X[keep]
             y = y[keep]
             print(
-                f"[MOS] Subsampled -> {len(X):,} points "
-                f"({(y == 1).sum():,} moving + {(y == 0).sum():,} static)"
+                f"[MOS] Subsampled: {len(X):,} points "
+                f"({(y == 1).sum():,} moving, {(y == 0).sum():,} static)"
             )
 
         self.scaler = StandardScaler()
@@ -484,14 +433,14 @@ class MotionSegmenter:
             self.classifier = self._make_xgb_classifier(X_sc, y)
         else:
             self.classifier = RandomForestClassifier(
-                n_estimators=100,
-                max_depth=15,
-                min_samples_leaf=10,
+                n_estimators=RF_N_ESTIMATORS,
+                max_depth=RF_MAX_DEPTH,
+                min_samples_leaf=RF_MIN_SAMPLES_LEAF,
                 n_jobs=-1,
                 random_state=42,
                 class_weight="balanced",
             )
-            print("[MOS] Training Random Forest (CPU) …")
+            print("[MOS] Training Random Forest (CPU)")
             self.classifier.fit(X_sc, y)
 
         feat_names = ["x", "y", "z", "range", "azimuth", "elevation", "intensity"]
@@ -500,48 +449,38 @@ class MotionSegmenter:
         print("[MOS] Feature importances:")
         importances = self.classifier.feature_importances_
         for name, imp in zip(feat_names, importances):
-            bar = "█" * int(imp * 50)
+            bar = "=" * int(imp * 40)
             print(f"  {name:10s} {imp:.3f}  {bar}")
 
-    # GPU (XGBoost)
     @staticmethod
     def _make_xgb_classifier(X_sc: np.ndarray, y: np.ndarray):
-        """Обучение с помощью XGBClassifier на GPU (CUDA)."""
+        """Train XGBoost classifier on GPU (CUDA)."""
         import xgboost as xgb
 
         n_pos = int((y == 1).sum())
         n_neg = int((y == 0).sum())
-        scale = n_neg / max(n_pos, 1)  # для баланса классов, усиливает вклад ошибок по редкому классу 
+        scale = n_neg / max(n_pos, 1)
 
         clf = xgb.XGBClassifier(
-            n_estimators=300,
-            max_depth=10,
-            learning_rate=0.1,
-            subsample=0.8,
-            colsample_bytree=0.8,
+            n_estimators=XGB_N_ESTIMATORS,
+            max_depth=XGB_MAX_DEPTH,
+            learning_rate=XGB_LEARNING_RATE,
+            subsample=XGB_SUBSAMPLE,
+            colsample_bytree=XGB_COLSAMPLE_BYTREE,
             scale_pos_weight=scale,
             eval_metric="logloss",
             device="cuda",
             random_state=42,
         )
-        print("[MOS] Training XGBoost (GPU/CUDA) …")
+        print("[MOS] Training XGBoost (GPU/CUDA)")
         clf.fit(X_sc, y)
         return clf
 
-    # Inference
     def segment_frame(
         self,
         pc: PointCloud,
     ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        """
-        Классифицирует точки одного кадра как moving (True) или static (False).
-        - pc имеет .velocity  ->  RANSAC ego-motion
-        - иначе               ->  Random Forest (должен быть загружен) или XGBoost (GPU)
-
-        Returns:
-            is_moving  : bool ndarray, True = moving
-            ego_params : (V_x, V_y) от RANSAC, либо None если использовался классификатор
-        """
+        """RANSAC если есть Doppler-скорость, иначе RF/XGBoost."""
         if pc.velocity is not None:
             ego_params, is_static = ransac_ego_motion(
                 pc, inlier_threshold=self.inlier_threshold
@@ -562,11 +501,7 @@ class MotionSegmenter:
         self,
         frames: List[PointCloud],
     ) -> List[np.ndarray]:
-        """
-        Батч-вариант segment_frame. Возвращает только маски moving;
-        ego-motion отбрасывается. Если нужны и `ego_params` - вызывайте
-        `segment_frame` напрямую.
-        """
+        """Покадровая сегментация для списка кадров."""
         return [self.segment_frame(pc)[0] for pc in frames]
 
     def segment_sequence(
@@ -578,33 +513,20 @@ class MotionSegmenter:
         moving_threshold: float = 0.35,
     ) -> List[np.ndarray]:
         """
-        Classify a sequence of frames using temporal voxel-occupancy.
-
-        Combines temporal consistency with the per-frame classifier:
-        a point is moving only if both temporal occupancy is low
-        and the per-frame classifier (or RANSAC) says moving.
-
-        Parameters:
-            frames           : N consecutive PointCloud objects
-            poses            : (N, 12) array of 3×4 SE(3) poses (from poses.txt)
-            n_context        : temporal window half-width (frames)
-            voxel_size       : voxel grid resolution [m]
-            moving_threshold : occupancy fraction below which a point is flagged
-
-        Returns:
-            List of bool arrays (True = moving), one per frame.
+        Сегментация последовательности HeLiMOS с позами (poses.txt).
+        Точка считается moving только если оба метода согласны:
+          1) воксельная занятость (temporal_consistency_segment) — низкая occupancy
+          2) покадровый классификатор — RF/XGBoost (Velodyne/Ouster) или RANSAC (Aeva)
         """
         temporal = temporal_consistency_segment(
             frames, poses, n_context, voxel_size, moving_threshold
         )
         per_frame = self.segment_frames(frames)
 
-        # Intersection: moving if temporal AND per-frame classifier agree
         return [t & p for t, p in zip(temporal, per_frame)]
 
-    # Persistence
     def save(self, path: str) -> None:
-        """Сохранить обученную модель на диск."""
+        """Save trained model to disk."""
         if self.classifier is None:
             raise RuntimeError("Train the model before saving.")
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -613,7 +535,7 @@ class MotionSegmenter:
             "scaler": self.scaler,
             "threshold": self.threshold,
         }, path)
-        print(f"[MOS] Model saved → {path}  (threshold={self.threshold})")
+        print(f"[MOS] Model saved: {path} (threshold={self.threshold})")
 
     def load(self, path: str, override_threshold: bool = False) -> None:
         """Load a previously saved model from disk."""
@@ -625,7 +547,7 @@ class MotionSegmenter:
         if not override_threshold:
             self.threshold = saved_threshold
 
-        print(f"[MOS] Model loaded ← {path}  (threshold={self.threshold})")
+        print(f"[MOS] Model loaded: {path} (threshold={self.threshold})")
 
 # Dataset helpers (HeLiMOS)
 def iter_helimos_labeled(
@@ -636,15 +558,6 @@ def iter_helimos_labeled(
 ) -> Iterator[Tuple[int, PointCloud, np.ndarray]]:
     """
     Iterate over labelled HeLiMOS frames.
-
-    Yields
-    ------
-    (frame_id, PointCloud, semantic_labels)
-
-    semantic_labels is a uint16 array where:
-      9   -> static
-      251 -> moving
-      0   -> unlabeled
     """
     split_file = os.path.join(data_root, f"{split}.txt")
     with open(split_file) as f:
