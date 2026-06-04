@@ -44,7 +44,7 @@ def _extract_features(pc: PointCloud) -> np.ndarray:
     xy = np.sqrt(x ** 2 + y ** 2)
     rng = np.sqrt(xy ** 2 + z ** 2)
     azimuth = np.arctan2(y, x)
-    elevation = np.arctan2(z, xy + 1e-9)
+    elevation = np.arctan2(z, xy + 1e-9)  # +1e-9 чтобы не делить на ноль в точке (0,0,z)
 
     intensity = pc.intensity if pc.intensity is not None else np.zeros_like(x)
     feats = [x, y, z, rng, azimuth, elevation, intensity]
@@ -70,6 +70,7 @@ def ransac_ego_motion(
     alpha = np.arctan2(y, x)
     v_r = pc.velocity.astype(np.float64)
 
+    # Модель Доплера для статичной точки
     A = np.column_stack([-np.cos(alpha), -np.sin(alpha)])
 
     rng = np.random.default_rng(seed)
@@ -78,11 +79,13 @@ def ransac_ego_motion(
     best_count = 0
 
     for _ in range(n_iterations):
+        # Берём минимальную выборку: 2 точки дают ровно 2 уравнения для 2 неизвестных
         idx = rng.choice(n_pts, 2, replace=False)
         try:
             params, *_ = np.linalg.lstsq(A[idx], v_r[idx], rcond=None)
         except np.linalg.LinAlgError:
             continue
+        # Считаем, насколько остальные точки согласны с найденной моделью скорости
         residuals = np.abs(A @ params - v_r)
         inliers = residuals < inlier_threshold
         n_in = int(inliers.sum())
@@ -91,10 +94,12 @@ def ransac_ego_motion(
             best_inliers = inliers
 
     if best_inliers is not None and best_inliers.sum() >= 2:
+        # Финальный уточняющий fit уже по всем статичным точкам, а не по случайной паре
         params, *_ = np.linalg.lstsq(A[best_inliers], v_r[best_inliers], rcond=None)
         residuals = np.abs(A @ params - v_r)
         is_static = residuals < inlier_threshold
     else:
+        # RANSAC не нашёл ни одной приличной гипотезы - считаем всё статикой
         params = np.zeros(2)
         is_static = np.ones(n_pts, dtype=bool)
 
@@ -117,45 +122,48 @@ def temporal_consistency_segment(
     Классификация точек по воксельной занятости во временном окне.
 
     Для каждого кадра i трансформируем точки из +-n_context соседних кадров
-    в его систему координат. Воксель, в который попали точки из многих кадров —
-    статика; из одного-двух — скорее всего движущийся объект.
+    в его систему координат. Воксель, в который попали точки из многих кадров -
+    статика; из одного-двух - скорее всего движущийся объект
     """
     n = len(frames)
     assert len(poses) >= n, "Need one pose per frame."
 
-    # упаковываем позы в SE(3) заранее, чтобы не пересчитывать внутри цикла
-    STRIDE = 20001  # предполагаем не более +-10000 вокселей по каждой оси
+    STRIDE = 20001
 
     Ts = [_pose_to_se3(poses[i]) for i in range(n)]
     results: List[np.ndarray] = []
 
     for i in range(n):
-        T_inv_i = np.linalg.inv(Ts[i])
+        T_inv_i = np.linalg.inv(Ts[i])  # обратная поза кадра i: из мира в сенсор i
         lo = max(0, i - n_context)
         hi = min(n, i + n_context + 1)
-        n_window = hi - lo
+        n_window = hi - lo  # реальная ширина окна
 
+        # voxel_frames[key] = множество индексов кадров j, из которых хоть одна точка
+        # попала в этот воксель (уже в системе координат кадра i)
         voxel_frames = defaultdict(set)
 
         for j in range(lo, hi):
             T_rel = T_inv_i @ Ts[j]
             pts = frames[j].xyz.astype(np.float64)
             pts_h = np.hstack([pts, np.ones((len(pts), 1))])
-            pts_t = (T_rel @ pts_h.T)[:3].T
+            pts_t = (T_rel @ pts_h.T)[:3].T  # трансформированные XYZ в фрейме i
 
-            vi = np.floor(pts_t / voxel_size).astype(np.int64)
+            vi = np.floor(pts_t / voxel_size).astype(np.int64)  # индекс вокселя
             keys = vi[:, 0] * STRIDE * STRIDE + vi[:, 1] * STRIDE + vi[:, 2]
             for k in keys:
-                voxel_frames[int(k)].add(j)
+                voxel_frames[int(k)].add(j)  # отмечаем, что кадр j посетил этот воксель
 
         pts_i = frames[i].xyz.astype(np.float64)
         vi_i = np.floor(pts_i / voxel_size).astype(np.int64)
         keys_i = vi_i[:, 0] * STRIDE * STRIDE + vi_i[:, 1] * STRIDE + vi_i[:, 2]
 
+        # occupancy[p] = доля кадров окна, в которых воксель точки p был занят
         occupancy = np.array(
             [len(voxel_frames.get(int(k), set())) / n_window for k in keys_i],
             dtype=np.float32,
         )
+        # Точки с низкой занятостью (< moving_threshold) помечаются как движущиеся
         results.append(occupancy < moving_threshold)
 
     return results
@@ -173,7 +181,7 @@ def cluster_moving_objects(
 
     Returns:
         cluster_ids : int32 ndarray (N,)
-            -2 -> static, -1 -> noise среди moving, ≥0 -> id кластера
+            -2 -> static, -1 -> noise среди moving, >=0 -> id кластера
     """
     cluster_ids = np.full(len(is_moving), -2, dtype=np.int32)
     moving_idx = np.where(is_moving)[0]
@@ -192,7 +200,7 @@ def cluster_moving_objects(
             xyz_mov, vel_mov, eps_xyz, min_samples, eps_vr,
         )
     else:
-        # Single-stage: 4D (xyz + Vr*weight). Чтобы Vr и xyz «жили» в одном
+        # Single-stage: 4D (xyz + Vr*weight). Чтобы Vr и xyz жили в одном
         # пространстве с понятным eps, домножаем Vr на eps_xyz/eps_vr.
         if has_vel:
             vr_scale = eps_xyz / max(eps_vr, 1e-6)
@@ -381,6 +389,7 @@ class MotionSegmenter:
             pc = read_kitti_bin(bin_path)
             semantic, _ = read_label(lbl_path)
 
+            # Берём только точки с известной разметкой - static или moving
             mask = (semantic == MOS_STATIC_LABEL) | (semantic == MOS_MOVING_LABEL)
             if mask.sum() == 0:
                 skipped += 1
@@ -413,6 +422,8 @@ class MotionSegmenter:
             if n_static_budget < n_moving:
                 n_static_budget = n_moving
 
+            # Статичных точек в датасете на порядок больше, чем движущихся.
+            # Оставляем все moving и сэмплируем static примерно в том же объёме
             rng = np.random.default_rng(42)
             static_sample = rng.choice(
                 static_idx, size=min(n_static_budget, len(static_idx)), replace=False
@@ -426,6 +437,7 @@ class MotionSegmenter:
                 f"({(y == 1).sum():,} moving, {(y == 0).sum():,} static)"
             )
 
+        # Нормализуем признаки
         self.scaler = StandardScaler()
         X_sc = self.scaler.fit_transform(X)
 
@@ -482,6 +494,8 @@ class MotionSegmenter:
     ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """RANSAC если есть Doppler-скорость, иначе RF/XGBoost."""
         if pc.velocity is not None:
+            # Aeva и 4D-радары дают скорость на каждую точку
+            # Используем RANSAC, которому разметка не нужна вообще
             ego_params, is_static = ransac_ego_motion(
                 pc, inlier_threshold=self.inlier_threshold
             )
@@ -494,6 +508,7 @@ class MotionSegmenter:
             )
         feats = _extract_features(pc)
         feats_sc = self.scaler.transform(feats)
+        # predict_proba возвращает [P(static), P(moving)] - берём столбец 1
         proba = self.classifier.predict_proba(feats_sc)[:, 1]
         return proba > self.threshold, None
 

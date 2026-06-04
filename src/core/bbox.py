@@ -207,7 +207,6 @@ def compute_cluster_obbs(
     """Build OBBs for DBSCAN clusters with labels >= 0.
 
     Parameters
-    ----------
     pc:
         PointCloud containing xyz and optional radial velocity.
     cluster_ids:

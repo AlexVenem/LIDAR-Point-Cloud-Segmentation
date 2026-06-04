@@ -154,6 +154,7 @@ def main() -> None:
         else:
             print("[MOS] Doppler velocity detected -> using RANSAC (model not needed)")
 
+        # определяется, какие точки движущиеся, а какие нет на одном кадре
         is_moving, ego_params = seg.segment_frame(pc)
 
         n_moving = int(is_moving.sum())

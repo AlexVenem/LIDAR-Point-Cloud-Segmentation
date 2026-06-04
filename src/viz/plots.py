@@ -110,8 +110,8 @@ def _classification_metrics(v_est: np.ndarray, v_ref: np.ndarray,
                             threshold: float) -> dict:
     """
     Бинаризует обе скорости по порогу (>threshold = "движется") и считает
-    confusion matrix + accuracy/precision/recall/F1/specificity.
-    "Положительный" класс = движение.
+    confusion matrix + accuracy/precision/recall/F1.
+    Положительный класс = движение.
     """
     y_pred = v_est > threshold
     y_true = v_ref > threshold
@@ -222,7 +222,7 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
 
     azimuth_raw = ins_raw["azimuth"].values
 
-    # Вычисление скоростей. Модуль = sqrt(Vx²+Vy²+Vz²): нельзя отбрасывать Vz,
+    # Вычисление скоростей. Модуль скорости: нельзя отбрасывать Vz,
     # ECEF-оси наклонены относительно локальной горизонтали.
     Vx_gps, Vy_gps, Vz_gps, ts_gps = GPS_to_V(gps_raw[["timestamp", "lat", "lon", "height"]].copy())
     speed_gps = np.sqrt(Vx_gps**2 + Vy_gps**2 + Vz_gps**2)
@@ -237,13 +237,15 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
     yaw_rate = np.gradient(az_unwrap, ts_ins)
 
     # Временная ось: начало с первого движения
-    t0 = ts_ins[0]
-    ts_ins_rel = ts_ins - t0
-    ts_gps_rel = ts_gps - t0
+    t0 = ts_ins[0]          # абсолютный UNIX-timestamp первого ИНС-сэмпла - общий ноль
+    ts_ins_rel = ts_ins - t0  # ИНС-метки в секундах от t0
+    ts_gps_rel = ts_gps - t0  # GPS-метки в секундах от t0
 
     moving = speed_ins > 0.5
+    # t_start - момент начала движения. Все до него отрезается
     t_start = ts_ins_rel[np.argmax(moving)] if moving.any() else 0.0
 
+    # GPS: убираем стоянку и выбросы
     gps_mask = (ts_gps_rel >= t_start) & (speed_gps < 12)
     ts_gps_plot    = ts_gps_rel[gps_mask] - t_start
     speed_gps_plot = speed_gps[gps_mask]
@@ -251,15 +253,15 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
     ins_mask = ts_ins_rel >= t_start
     ts_ins_plot    = ts_ins_rel[ins_mask] - t_start
     speed_ins_plot = uniform_filter1d(speed_ins[ins_mask], size=3)
-    yaw_rate_plot  = yaw_rate[ins_mask]
+    yaw_rate_plot  = yaw_rate[ins_mask] # угловая скорость рыскания ИНС
 
     # Aeva ego-velocity (RANSAC per frame, с кэшированием)
-    plot_t_min, plot_t_max = 100, 250
+    plot_t_min, plot_t_max = 100, 250  # видимое окно графика
 
-    ts_aeva_plot = None
-    speed_aeva_plot = None
-    ts_icp_plot = None
-    yaw_rate_icp_plot = None
+    ts_aeva_plot = None        # метки кадров Aeva в окне графика
+    speed_aeva_plot = None     # скорость машины из RANSAC по Aeva
+    ts_icp_plot = None         # метки пар кадров Aeva для ICP (середина интервала)
+    yaw_rate_icp_plot = None   # yaw rate из ICP по Aeva, сглаженный
     if aeva_path:
         cache_path = _os.path.join(aeva_path, "aeva_ego_cache.npz")
 
@@ -325,6 +327,8 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
         icp_ts = np.array(icp_ts)
 
         if len(icp_files) > 1:
+            # Вокселизация 0.5 м - уменьшаем облако в 10-20 раз, сохраняя геометрию
+            # ICP сходится быстрее и не падает по памяти на плотных кадрах Aeva
             voxel_size = 0.5
             yaw_rates = []
             ts_mid = []
@@ -338,14 +342,22 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
                 if prev_pcd is not None:
                     dt = icp_ts[i] - icp_ts[i - 1]
                     if dt > 0:
+                        # Для каждой точки текущего кадра ищем ближайшую в предыдущем, затем итеративно
+                        # уточняем трансформацию по МНК. 30 итераций хватает для
+                        # небольших сдвигов между соседними кадрами
                         result = o3d.pipelines.registration.registration_icp(
                             pcd, prev_pcd, max_correspondence_distance=1.0,
                             estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(),
                             criteria=o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=30),
                         )
+                        # transformation - матрица SE(3) 4x4: верхний левый блок 3x3 - поворот.
+                        # R[0,0]=cos(yaw), R[1,0]=sin(yaw) для вращения вокруг оси Z
                         R = result.transformation[:3, :3]
                         yaw = np.arctan2(R[1, 0], R[0, 0])
+                        # ICP возвращает насколько повернулось облако,
+                        # а нам нужно насколько повернулась машина - знак обратный.
                         yaw_rates.append(-np.degrees(yaw) / dt)
+                        # Временная метка - середина интервала между кадрами
                         ts_mid.append((icp_ts[i] + icp_ts[i - 1]) / 2)
 
                 prev_pcd = pcd
@@ -356,13 +368,15 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
                 print(f"\n[ICP] Готово: {len(yaw_rates)} пар")
                 ts_icp_plot = np.array(ts_mid)
                 yaw_rate_icp_raw = np.array(yaw_rates)
+                # Скользящее среднее по 5 кадрам убирает дёргания
+                # ICP между соседними кадрами шумит сильнее, чем ИНС
                 yaw_rate_icp_plot = uniform_filter1d(yaw_rate_icp_raw, size=5)
 
     # Radar ego-velocity (RANSAC) + ICP yaw rate
-    ts_radar_plot = None
-    speed_radar_plot = None
-    ts_radar_icp_plot = None
-    yaw_rate_radar_icp_plot = None
+    ts_radar_plot = None         # метки кадров радара в окне графика
+    speed_radar_plot = None      # скорость платформы из RANSAC по радару
+    ts_radar_icp_plot = None     # метки пар кадров радара для ICP (середина интервала)
+    yaw_rate_radar_icp_plot = None  # yaw rate из ICP по радару, сглаженный
     if radar_path:
         import open3d as o3d
         from src.datasets.radar import load_radar_frame
@@ -409,6 +423,8 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
         radar_icp_ts = np.array(radar_icp_ts)
 
         if len(radar_icp_files) > 1:
+            # Та же схема, что для Aeva - вокселизация + ICP.
+            # Радар разреженнее лидара, поэтому ICP здесь шумит немного больше
             voxel_size = 0.5
             r_yaw_rates, r_ts_mid = [], []
             prev_pcd = None
@@ -426,8 +442,10 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
                             estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(),
                             criteria=o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=30),
                         )
+                        # R[0,0]=cos(yaw), R[1,0]=sin(yaw) - поворот вокруг оси Z
                         R = result.transformation[:3, :3]
                         yaw = np.arctan2(R[1, 0], R[0, 0])
+                        # знак ICP и знак поворота машины противоположны
                         r_yaw_rates.append(-np.degrees(yaw) / dt)
                         r_ts_mid.append((radar_icp_ts[i] + radar_icp_ts[i - 1]) / 2)
 
@@ -438,17 +456,16 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
             if r_yaw_rates:
                 print(f"\n[Radar ICP] Готово: {len(r_yaw_rates)} пар")
                 ts_radar_icp_plot = np.array(r_ts_mid)
+                # Сглаживание по 5 кадрам - аналогично блоку Aeva
                 yaw_rate_radar_icp_plot = uniform_filter1d(np.array(r_yaw_rates), size=5)
 
     # Метрики качества оценок |V| относительно INS/GPS (ground truth)
-    # Адаптация под классификацию: для каждой пары интерполируем reference
-    # на метки оценщика, бинаризуем по motion_threshold, считаем
-    # confusion matrix + accuracy/precision/recall/F1 для класса "движется".
-    # Реgress-метрики (MAE/RMSE/bias/max|err|/R²) считаем на тех же выровненных рядах.
     ins_win = (ts_ins_plot >= plot_t_min) & (ts_ins_plot <= plot_t_max)
-    ts_ins_win, speed_ins_win = ts_ins_plot[ins_win], speed_ins_plot[ins_win]
+    ts_ins_win = ts_ins_plot[ins_win]      # ИНС-метки в окне [plot_t_min, plot_t_max]
+    speed_ins_win = speed_ins_plot[ins_win]  # ИНС-скорость в окне - ground truth
     gps_win = (ts_gps_plot >= plot_t_min) & (ts_gps_plot <= plot_t_max)
-    ts_gps_win, speed_gps_win = ts_gps_plot[gps_win], speed_gps_plot[gps_win]
+    ts_gps_win = ts_gps_plot[gps_win]      # GPS-метки в окне
+    speed_gps_win = speed_gps_plot[gps_win]  # GPS-скорость в окне - второй эталон
 
     def _eval_pair(name_est, ts_e, v_e, name_ref, ts_r, v_r):
         aligned = _resample_reference(ts_e, v_e, ts_r, v_r)
@@ -509,7 +526,7 @@ def plot_velocity_comparison(gps_path: str, ins_path: str, output_path: str,
 
     _peak_colors = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4"]
 
-    # Построение (2 строки: верх — скорость + yaw rate, низ — карта)
+    # Построение (2 строки: верх - скорость + yaw rate, низ - карта)
     fig = plt.figure(figsize=(14, 11))
     gs = fig.add_gridspec(2, 2, height_ratios=[0.8, 1.2], hspace=0.30, wspace=0.35)
     ax1 = fig.add_subplot(gs[0, 0])
@@ -677,14 +694,6 @@ def plot_mos(
 ) -> None:
     """
     2D-графики MOS-результата (static vs moving) с опциональным кадром камеры.
-
-    Панели (без камеры):
-      Левый  — radial velocity vs azimuth (только при наличии velocity)
-      Правый — bird's-eye view (x, y) с раскраской кластеров
-
-    Панели (с камерой):
-      Верхний ряд — velocity vs azimuth + bird's-eye view
-      Нижний ряд  — изображение с камеры (на всю ширину)
 
     Parameters:
         pc          : PointCloud (xyz обязательно, velocity — опционально)
@@ -978,13 +987,13 @@ def _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img,
         cluster_colors = _get_cluster_colors(n_clusters)
         cid_to_color = {int(cid): cluster_colors[i] for i, cid in enumerate(unique_cluster_ids)}
 
-    # ── Top-left: Camera
+    # Top-left: Camera
     if camera_img is not None:
         ax_cam.imshow(camera_img)
     ax_cam.set_title("Stereo Left Camera", fontsize=9)
     ax_cam.axis("off")
 
-    # ── Helper: draw clustered or plain moving points on an axis
+    # Helper: draw clustered or plain moving points on an axis
     def _scatter_moving(ax, xvals, yvals):
         if has_clusters:
             noise_mask = is_moving & (cluster_ids < 0)
@@ -999,7 +1008,7 @@ def _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img,
             ax.scatter(xvals[is_moving], yvals[is_moving],
                        s=3, c="#e63333", alpha=0.7, rasterized=True)
 
-    # ── Top-right: BEV full
+    # Top-right: BEV full
     ax_bev.scatter(x[static], y[static],
                    s=0.3, c="#999999", alpha=0.4, rasterized=True)
     _scatter_moving(ax_bev, x, y)
@@ -1014,7 +1023,7 @@ def _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img,
     ax_bev.set_aspect("equal")
     ax_bev.grid(True, alpha=0.3)
 
-    # ── Bottom-left: Velocity vs Azimuth
+    # Bottom-left: Velocity vs Azimuth
     if pc.velocity is not None:
         v = pc.velocity
         ax_vel.scatter(azimuth_deg[static], v[static],
@@ -1040,7 +1049,7 @@ def _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img,
     ax_vel.set_title("Radial velocity vs Azimuth", fontsize=9)
     ax_vel.grid(True, alpha=0.3)
 
-    # ── Bottom-right: BEV zoom
+    # Bottom-right: BEV zoom
     ax_zoom.scatter(x[static], y[static],
                     s=0.5, c="#999999", alpha=0.4, rasterized=True)
     _scatter_moving(ax_zoom, x, y)
