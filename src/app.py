@@ -91,6 +91,8 @@ def main() -> None:
                         help="DBSCAN: минимум точек в кластере (по умолчанию: 8)")
     parser.add_argument("--single-stage", action="store_true",
                         help="Один проход 4D DBSCAN вместо двухэтапного Vr→xyz")
+    parser.add_argument("--track", action="store_true",
+                        help="Включение трекинга для MOS")
 
     args = parser.parse_args()
 
@@ -257,6 +259,17 @@ def main() -> None:
             if args.model and os.path.exists(args.model):
                 seg.load(args.model)
 
+            tracker = None
+
+            if getattr(args, "track", False):
+                from src.core.tracker import MultiObjectTracker
+
+                tracker = MultiObjectTracker(
+                    max_match_distance=3.0,
+                    max_missed=5,
+                    min_hits=2,
+                )
+
             output_dir = args.output if args.output != GPS_MAP_FILE else "output/mos_frames"
             render_mos_sequence(
                 bin_files=bin_files,
@@ -266,6 +279,7 @@ def main() -> None:
                 camera_dir=args.camera,
                 inlier_threshold=args.inlier_threshold,
                 dpi=args.dpi,
+                tracker=tracker,
             )
             return
 
@@ -306,8 +320,11 @@ def main() -> None:
         )
         print(f"Frames: {len(frames)} | Moving: {total_moving}/{total_pts} "
               f"({100*total_moving/total_pts:.1f}%) | Clusters: {total_clusters}")
+            
         return
 
+
+    
     # Стандартные действия по датасетам
     if args.dataset == "helimos":
         from src.datasets.helimos import load_helimos_frame

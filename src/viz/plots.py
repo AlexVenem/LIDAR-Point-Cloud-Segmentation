@@ -637,32 +637,117 @@ def _get_cluster_colors(n: int):
     return [cmap(i) for i in range(n)]
 
 
-def _draw_obb_bev(ax, obb, color):
-    """Спроецировать OBB на плоскость X-Y и нарисовать как полигон с подписью."""
+def _draw_obb_bev(ax, obb, color, draw_label: bool = False):
+    """Спроецировать OBB на плоскость X-Y и нарисовать как полигон."""
     from matplotlib.patches import Polygon
     from scipy.spatial import ConvexHull
 
     corners_xy = obb.corners()[:, :2]  # (8, 2)
+
     try:
         hull = ConvexHull(corners_xy)
         poly_pts = corners_xy[hull.vertices]
     except Exception:
-        # Вырожденная проекция (точки коллинеарны) — fallback на AABB
+        # Вырожденная проекция откат на AABB
         mn, mx = corners_xy.min(0), corners_xy.max(0)
         poly_pts = np.array([
-            [mn[0], mn[1]], [mx[0], mn[1]], [mx[0], mx[1]], [mn[0], mx[1]],
+            [mn[0], mn[1]],
+            [mx[0], mn[1]],
+            [mx[0], mx[1]],
+            [mn[0], mx[1]],
         ])
 
-    ax.add_patch(Polygon(poly_pts, closed=True, fill=False,
-                         edgecolor=color, linewidth=1.8))
-    ax.text(
-        obb.center[0], poly_pts[:, 1].max() + 0.3,
-        f"#{obb.cluster_id}",
-        fontsize=7, color=color, ha="center", va="bottom",
-        fontweight="bold",
-        bbox=dict(boxstyle="round,pad=0.15", facecolor="white", alpha=0.7, edgecolor="none"),
+    ax.add_patch(
+        Polygon(
+            poly_pts,
+            closed=True,
+            fill=False,
+            edgecolor=color,
+            linewidth=1.8,
+            zorder=15,
+            clip_on=True,
+        )
     )
 
+    if not draw_label:
+        return
+
+    ax.text(
+        obb.center[0],
+        poly_pts[:, 1].max() + 0.3,
+        f"#{obb.cluster_id}",
+        fontsize=7,
+        color=color,
+        ha="center",
+        va="bottom",
+        clip_on=True,
+        zorder=16,
+        fontweight="bold",
+        bbox=dict(
+            boxstyle="round,pad=0.15",
+            facecolor="white",
+            alpha=0.7,
+            edgecolor="none",
+        ),
+    )
+
+
+def _draw_kalman_tracks_bev(ax, tracks, arrow_scale: float = 0.7):
+    """
+    Нарисовать треки от Калмана на виде сверху
+    """
+    if not tracks:
+        return
+
+    for tr in tracks:
+        if getattr(tr, "missed", 0) > 0:
+            continue
+        cx, cy = tr.center
+        vx, vy = tr.velocity
+
+        speed = float(np.hypot(vx, vy))
+
+        if speed < 0.05:
+            ax.plot(
+                cx,
+                cy,
+                marker="x",
+                markersize=6,
+                color="black",
+                zorder=20,
+            )
+        else:
+            ax.arrow(
+                cx,
+                cy,
+                vx * arrow_scale,
+                vy * arrow_scale,
+                head_width=0.35,
+                head_length=0.45,
+                length_includes_head=True,
+                color="black",
+                linewidth=1.6,
+                zorder=20,
+                clip_on=True,
+            )
+
+        ax.text(
+            cx,
+            cy,
+            f"T{tr.track_id}\n{speed:.1f} m/s",
+            fontsize=7,
+            color="black",
+            ha="left",
+            va="bottom",
+            zorder=21,
+            clip_on=True,
+            bbox=dict(
+                boxstyle="round,pad=0.2",
+                facecolor="white",
+                alpha=0.75,
+                edgecolor="none",
+            ),
+        )
 
 def plot_mos(
     pc: PointCloud,
@@ -672,6 +757,7 @@ def plot_mos(
     camera_img: "np.ndarray | None" = None,
     cluster_ids: "np.ndarray | None" = None,
     obbs: "list | None" = None,
+    tracks: "list | None" = None,
     camera_k: "np.ndarray | None" = None,
     t_cam_lidar: "np.ndarray | None" = None,
 ) -> None:
@@ -790,6 +876,9 @@ def plot_mos(
         if obbs:
             for obb in obbs:
                 _draw_obb_bev(ax_bev, obb, cid_to_color.get(obb.cluster_id, "black"))
+
+        if tracks:
+            _draw_kalman_tracks_bev(ax_bev, tracks)
     else:
         ax_bev.scatter(
             x[is_moving], y[is_moving],
@@ -957,7 +1046,7 @@ def _compute_fixed_limits(bin_files, loader_fn, n_probe=20):
 
 def _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img,
                     frame_idx, n_frames, lim,
-                    cluster_ids=None):
+                    cluster_ids=None, obbs=None, tracks=None):
     """Clear axes and redraw a single MOS frame with fixed axis limits."""
     ax_cam, ax_bev, ax_vel, ax_zoom = axes
 
@@ -967,16 +1056,39 @@ def _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img,
     x, y = pc.xyz[:, 0], pc.xyz[:, 1]
     azimuth_deg = np.degrees(np.arctan2(y, x))
     static = ~is_moving
+
     unique_cluster_ids = (
-        np.unique(cluster_ids[cluster_ids >= 0]) if cluster_ids is not None else np.array([], dtype=np.int32)
+        np.unique(cluster_ids[cluster_ids >= 0])
+        if cluster_ids is not None
+        else np.array([], dtype=np.int32)
     )
     has_clusters = cluster_ids is not None and len(unique_cluster_ids) > 0
 
     # Cluster colors
+    cid_to_color = {}
     if has_clusters:
         n_clusters = len(unique_cluster_ids)
         cluster_colors = _get_cluster_colors(n_clusters)
-        cid_to_color = {int(cid): cluster_colors[i] for i, cid in enumerate(unique_cluster_ids)}
+        cid_to_color = {
+            int(cid): cluster_colors[i]
+            for i, cid in enumerate(unique_cluster_ids)
+        }
+
+    # ── Helper: draw OBBs on BEV axis
+    def _draw_obbs(ax):
+        if not obbs:
+            return
+
+        for obb in obbs:
+            color = cid_to_color.get(int(obb.cluster_id), "black")
+            _draw_obb_bev(ax, obb, color, draw_label=False)
+
+    # ── Helper: draw Kalman tracks on BEV axis
+    def _draw_tracks(ax):
+        if not tracks:
+            return
+
+        _draw_kalman_tracks_bev(ax, tracks)
 
     # ── Top-left: Camera
     if camera_img is not None:
@@ -988,27 +1100,59 @@ def _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img,
     def _scatter_moving(ax, xvals, yvals):
         if has_clusters:
             noise_mask = is_moving & (cluster_ids < 0)
-            ax.scatter(xvals[noise_mask], yvals[noise_mask],
-                       s=1, c="#e63333", alpha=0.3, rasterized=True)
+            ax.scatter(
+                xvals[noise_mask],
+                yvals[noise_mask],
+                s=1,
+                c="#e63333",
+                alpha=0.3,
+                rasterized=True,
+            )
+
             for cid in unique_cluster_ids:
                 cmask = cluster_ids == cid
                 c = cid_to_color[int(cid)]
-                ax.scatter(xvals[cmask], yvals[cmask],
-                           s=4, color=c, alpha=0.8, rasterized=True)
+                ax.scatter(
+                    xvals[cmask],
+                    yvals[cmask],
+                    s=4,
+                    color=c,
+                    alpha=0.8,
+                    rasterized=True,
+                )
         else:
-            ax.scatter(xvals[is_moving], yvals[is_moving],
-                       s=3, c="#e63333", alpha=0.7, rasterized=True)
+            ax.scatter(
+                xvals[is_moving],
+                yvals[is_moving],
+                s=3,
+                c="#e63333",
+                alpha=0.7,
+                rasterized=True,
+            )
 
     # ── Top-right: BEV full
-    ax_bev.scatter(x[static], y[static],
-                   s=0.3, c="#999999", alpha=0.4, rasterized=True)
+    ax_bev.scatter(
+        x[static],
+        y[static],
+        s=0.3,
+        c="#999999",
+        alpha=0.4,
+        rasterized=True,
+    )
     _scatter_moving(ax_bev, x, y)
+
+    _draw_obbs(ax_bev)
+
+    _draw_tracks(ax_bev)
+
     ax_bev.set_xlim(lim["x"])
     ax_bev.set_ylim(lim["y"])
     ax_bev.set_xlabel("x, m")
     ax_bev.set_ylabel("y, m")
     ax_bev.set_title(
-        f"Bird's-eye view ({len(unique_cluster_ids)} clusters)" if has_clusters else "Bird's-eye view",
+        f"Bird's-eye view ({len(unique_cluster_ids)} clusters)"
+        if has_clusters
+        else "Bird's-eye view",
         fontsize=9,
     )
     ax_bev.set_aspect("equal")
@@ -1017,22 +1161,41 @@ def _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img,
     # ── Bottom-left: Velocity vs Azimuth
     if pc.velocity is not None:
         v = pc.velocity
-        ax_vel.scatter(azimuth_deg[static], v[static],
-                       s=0.4, c="#999999", alpha=0.5, rasterized=True)
+        ax_vel.scatter(
+            azimuth_deg[static],
+            v[static],
+            s=0.4,
+            c="#999999",
+            alpha=0.5,
+            rasterized=True,
+        )
         _scatter_moving(ax_vel, azimuth_deg, v)
+
         if ego_params is not None:
             a_sweep = np.linspace(lim["az"][0], lim["az"][1], 500)
-            vr = -ego_params[0] * np.cos(np.radians(a_sweep)) \
-                 - ego_params[1] * np.sin(np.radians(a_sweep))
+            vr = (
+                -ego_params[0] * np.cos(np.radians(a_sweep))
+                - ego_params[1] * np.sin(np.radians(a_sweep))
+            )
             ax_vel.plot(a_sweep, vr, "k-", lw=1.5)
 
             ego_speed = float(np.sqrt(ego_params[0] ** 2 + ego_params[1] ** 2))
             ax_vel.text(
-                0.98, 0.97, f"|V_ego| = {ego_speed:.2f} m/s",
-                transform=ax_vel.transAxes, ha="right", va="top",
-                fontsize=10, fontweight="bold",
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
+                0.98,
+                0.97,
+                f"|V_ego| = {ego_speed:.2f} m/s",
+                transform=ax_vel.transAxes,
+                ha="right",
+                va="top",
+                fontsize=10,
+                fontweight="bold",
+                bbox=dict(
+                    boxstyle="round,pad=0.3",
+                    facecolor="white",
+                    alpha=0.8,
+                ),
             )
+
     ax_vel.set_xlim(lim["az"])
     ax_vel.set_ylim(lim["v"])
     ax_vel.set_xlabel("azimuth, deg")
@@ -1041,9 +1204,20 @@ def _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img,
     ax_vel.grid(True, alpha=0.3)
 
     # ── Bottom-right: BEV zoom
-    ax_zoom.scatter(x[static], y[static],
-                    s=0.5, c="#999999", alpha=0.4, rasterized=True)
+    ax_zoom.scatter(
+        x[static],
+        y[static],
+        s=0.5,
+        c="#999999",
+        alpha=0.4,
+        rasterized=True,
+    )
     _scatter_moving(ax_zoom, x, y)
+
+    _draw_obbs(ax_zoom)
+
+    _draw_tracks(ax_zoom)
+
     ax_zoom.set_xlim(lim["x_zoom"])
     ax_zoom.set_ylim(lim["y_zoom"])
     ax_zoom.set_xlabel("x, m")
@@ -1055,11 +1229,31 @@ def _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img,
     n_mov = int(is_moving.sum())
     n_tot = len(is_moving)
     n_clu = len(unique_cluster_ids) if has_clusters else 0
-    fig.suptitle(
+    n_obbs = len(obbs) if obbs else 0
+    n_tracks = (
+        sum(1 for tr in tracks if getattr(tr, "missed", 0) == 0)
+        if tracks
+        else 0
+    )
+
+    title = (
         f"Frame {frame_idx + 1}/{n_frames}  |  "
         f"moving {n_mov}/{n_tot} ({100 * n_mov / n_tot:.1f}%)"
-        + (f"  |  {n_clu} clusters" if n_clu else ""),
-        fontsize=12, y=0.98,
+    )
+
+    if n_clu:
+        title += f"  |  {n_clu} clusters"
+
+    if n_obbs:
+        title += f"  |  {n_obbs} OBB"
+
+    if n_tracks:
+        title += f"  |  {n_tracks} tracks"
+
+    fig.suptitle(
+        title,
+        fontsize=12,
+        y=0.98,
     )
 
 
@@ -1071,21 +1265,44 @@ def render_mos_sequence(
     camera_dir: "str | None" = None,
     inlier_threshold: float = 0.5,
     dpi: int = 120,
+    tracker=None,
+    draw_tracks: bool = True,
+    eps_xyz: float = 1.0,
+    eps_vr: float = 0.5,
+    min_samples: int = 8,
+    two_stage: bool = True,
 ) -> None:
     """
-    Покадровый рендеринг MOS-результатов в PNG (2x2: camera, BEV, velocity, BEV-zoom).
+    Покадровый рендеринг MOS-результатов в PNG
+    2x2: camera, BEV, velocity, BEV-zoom.
 
-    Parameters:
+    Параметры:
         bin_files         : отсортированный список путей к .bin кадрам
         loader_fn         : функция загрузки кадра (path -> PointCloud)
-        segmenter         : MotionSegmenter (уже загруженный, если нужна модель)
+        segmenter         : MotionSegmenter
         output_dir        : папка для сохранения PNG
-        camera_dir        : папка stereo_left с .png кадрами камеры (или None)
+        camera_dir        : папка stereo_left с .png кадрами камеры или None
         inlier_threshold  : RANSAC порог [m/s]
         dpi               : DPI сохраняемых изображений
+
+        eps_xyz           : DBSCAN eps по xyz
+        eps_vr            : DBSCAN eps по radial velocity
+        min_samples       : DBSCAN min_samples
+        two_stage         : использовать двухэтапный DBSCAN
     """
     import matplotlib.image as mpimg
-    from src.motion_segmentation import ransac_ego_motion, cluster_moving_objects
+
+    from src.motion_segmentation import (
+        ransac_ego_motion,
+        cluster_moving_objects,
+        filter_motion_clusters,
+        relabel_clusters,
+    )
+
+    try:
+        from src.core.bbox import compute_cluster_obbs
+    except ImportError:
+        compute_cluster_obbs = None
 
     _os.makedirs(output_dir, exist_ok=True)
 
@@ -1102,40 +1319,101 @@ def render_mos_sequence(
     print(f"  BEV y: [{lim['y'][0]:.0f}, {lim['y'][1]:.0f}] m")
 
     fig, ((ax_cam, ax_bev), (ax_vel, ax_zoom)) = plt.subplots(
-        2, 2, figsize=(14, 9),
+        2,
+        2,
+        figsize=(14, 9),
         gridspec_kw={"hspace": 0.35, "wspace": 0.3},
     )
     axes = (ax_cam, ax_bev, ax_vel, ax_zoom)
 
     n = len(bin_files)
+
     for i, bin_path in enumerate(bin_files):
         pc = loader_fn(bin_path)
         [is_moving] = segmenter.segment_frames([pc])
 
         ego_params = None
         if pc.velocity is not None:
-            ego_params, _ = ransac_ego_motion(pc, inlier_threshold=inlier_threshold)
+            ego_params, _ = ransac_ego_motion(
+                pc,
+                inlier_threshold=inlier_threshold,
+            )
 
         # DBSCAN кластеризация движущихся точек
-        cluster_ids = cluster_moving_objects(pc, is_moving)
+        cluster_ids = cluster_moving_objects(
+            pc,
+            is_moving,
+            eps_xyz=eps_xyz,
+            eps_vr=eps_vr,
+            min_samples=min_samples,
+            two_stage=two_stage,
+        )
+
+        cluster_ids = filter_motion_clusters(
+            pc,
+            cluster_ids,
+            ego_params=ego_params,
+            min_cluster_points=15,
+            min_mean_residual=0.40,
+            min_moving_ratio=0.60,
+            residual_threshold=0.30,
+            min_abs_mean_vr=0.10,
+        )
+
+        cluster_ids = relabel_clusters(cluster_ids)
+
+        unique_cluster_ids = np.unique(cluster_ids[cluster_ids >= 0])
+        obbs = compute_cluster_obbs(pc, cluster_ids) if len(unique_cluster_ids) > 0 else []
+
+        # Timestamp берём из имени .bin файла
+        stem = _os.path.splitext(_os.path.basename(bin_path))[0]
+        timestamp_ns = int(stem) if stem.isdigit() else i
+
+        tracks = None
+        
+        if tracker is not None:
+            tracks = tracker.update(obbs, timestamp_ns)
 
         camera_img = None
-        if cam_index:
-            stem = _os.path.splitext(_os.path.basename(bin_path))[0]
-            if stem.isdigit():
-                img_path = _find_closest_camera(cam_index, int(stem))
-                if img_path:
-                    camera_img = mpimg.imread(img_path)
+        if cam_index and stem.isdigit():
+            img_path = _find_closest_camera(cam_index, int(stem))
+            if img_path:
+                camera_img = mpimg.imread(img_path)
 
-        _draw_mos_frame(fig, axes, pc, is_moving, ego_params, camera_img, i, n, lim,
-                        cluster_ids=cluster_ids)
+        _draw_mos_frame(
+            fig,
+            axes,
+            pc,
+            is_moving,
+            ego_params,
+            camera_img,
+            i,
+            n,
+            lim,
+            cluster_ids=cluster_ids,
+            obbs=obbs,
+            tracks=tracks if draw_tracks else None,
+        )
 
         out_path = _os.path.join(output_dir, f"{i:06d}.png")
         fig.savefig(out_path, dpi=dpi)
-        n_clu = int(np.unique(cluster_ids[cluster_ids >= 0]).size)
-        print(f"\r[{i + 1}/{n}] {n_clu} clusters | saved {out_path}", end="", flush=True)
+
+        n_clu = int(unique_cluster_ids.size)
+        n_obbs = len(obbs)
+        n_tracks = len(tracks) if tracks is not None else 0
+
+        print(
+            f"\r[{i + 1}/{n}] "
+            f"{n_clu} clusters | "
+            f"{n_obbs} OBB | "
+            f"{n_tracks} tracks | "
+            f"saved {out_path}",
+            end="",
+            flush=True,
+        )
 
     plt.close(fig)
+
     print(f"\n\nГотово! {n} кадров сохранено в {output_dir}/")
     print(f"\nСобрать GIF:   magick convert -delay 10 -loop 0 {output_dir}/*.png mos.gif")
     print(f"Собрать видео: ffmpeg -framerate 10 -i {output_dir}/%06d.png -c:v libx264 -pix_fmt yuv420p mos.mp4")
