@@ -200,7 +200,15 @@ python -m src.app --dataset helimos --action mos-sequence --sequence data/Deskew
 
 ### 4. Покадровый рендеринг последовательности
 
-Обработка всех кадров Aeva и сохранение каждог как PNG с фиксированными осями:
+Для датасета HeRCULES Aeva доступен покадровый режим обработки последовательности LiDAR-кадров. В этом режиме для каждого кадра выполняется полный пайплайн:
+
+```text
+Aeva LiDAR frame
+→ MOS: сегментация движения
+→ DBSCAN: кластеризация движущихся точек
+→ OBB: ориентированный бокс для каждого кластера
+→ Kalman tracking: соотношение объектов и сглаживание движений
+→ PNG отрисовка кадров
 
 ```bash
 python -m src.app --dataset hercules --action mos-sequence \
@@ -208,6 +216,33 @@ python -m src.app --dataset hercules --action mos-sequence \
     --output output/mos_frames
 
 ```
+
+```bash
+python -m src.app --dataset hercules --action mos-sequence \
+  --aeva 03_Day/Aeva \
+  --camera 03_Day/stereo_left \
+  --output output/mos_tracking_frames \
+  --max-frames 80 \
+  --track \
+  --eps-xyz 1.0 \
+  --eps-vr 0.5 \
+  --min-samples 8
+```
+
+Визуализация каждого кадра сохраняется как PNG в формате 2x2:
+
+- верхний левый график — изображение stereo-left камеры;
+- верхний правый график — полный BEV-вид облака точек;
+- нижний левый график — зависимость radial velocity от azimuth;
+- нижний правый график — приближенный BEV-вид ближней области.
+
+В BEV-визуализации используются следующие обозначения:
+
+- серые точки - статичные точки;
+- красные точки - moving-точки, не вошедшие в устойчивые кластеры;
+- цветные точки - DBSCAN-кластеры движущихся точек;
+- цветные контуры - OBB, построенные по кластерам;
+- подписи T0, T1, T2 и стрелки - Kalman-треки и оцененное направление движения объекта.
 
 Для Aeva (есть Допплер) модель не нужна — используется RANSAC. Для сенсоров без Допплера добавьте `--model models/mos_rf.pkl`.
 
@@ -288,6 +323,10 @@ python -m src.app --dataset hercules --gps 03_Day/sensor_data/gps.csv --ins 03_D
 - `src/examples/gps_example.py` — чтение и визуализация GPS на карте (использует константы из `src/config.py`)
 - `src/examples/mos_sequence_example.py` — покадровый рендеринг MOS для Hercules Aeva + стерео-камера
 - CLI: `src/app.py` — универсальный интерфейс для всех датасетов
+- `src/motion_segmentation.py` — MOS, DBSCAN-кластеризация и постфильтрация moving-кластеров
+- `src/core/bbox.py` — построение AABB/OBB для кластеров движущихся точек
+- `src/core/tracker.py` — multi-object tracking по центрам OBB
+- `src/viz/plots.py` — визуализация MOS, DBSCAN, OBB и Kalman-треков
 
 ---
 
@@ -296,9 +335,12 @@ python -m src.app --dataset hercules --gps 03_Day/sensor_data/gps.csv --ins 03_D
 См. `requirements.txt`. Основные пакеты:
 - pandas, numpy — базовая работа с данными
 - pyproj - преобразование координат GPS 
-- folium — интерактивные карты
-- matplotlib — графики
-- open3d — (опционально) визуализация облаков точек
-- scikit-learn — Random Forest для MOS
-- xgboost — (опционально) GPU-ускоренное обучение MOS через CUDA
-- joblib — сериализация модели
+- folium - интерактивные карты
+- matplotlib - графики
+- open3d - (опционально) визуализация облаков точек
+- scikit-learn - Random Forest для MOS
+- xgboost - (опционально) GPU-ускоренное обучение MOS через CUDA
+- joblib - сериализация модели
+- imageio - чтение PNG-кадров при сборке видео;
+- imageio-ffmpeg - FFmpeg backend для Python-сборки MP4;
+- FFmpeg - опционально, если видео собирается внешней командой `ffmpeg`.
